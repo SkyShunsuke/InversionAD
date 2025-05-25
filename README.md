@@ -24,7 +24,7 @@ This is a PyTorch/GPU implementation of the paper [Reconstruction-Free Anomaly D
 
 Download the code:
 ```
-git clone https://github.com/SkyShunsuke/InversionAD
+git clone https://github.com/SkyShunsuke/InversionAD.git
 cd InversionAD
 ```
 
