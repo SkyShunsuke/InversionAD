@@ -8,6 +8,7 @@ from .mvtec_ad import MVTecAD, AD_CLASSES
 from .mvtec_ad2 import MVTecAD2, AD2_CLASSES
 from .mvtec_loco import MVTecLOCO, LOCO_CLASSES
 from .visa import VisA, VISA_CLASSES
+from .realiad import RealIAD, REALIAD_CLASSES
 
 import random
 
@@ -63,6 +64,12 @@ def build_dataset(*, dataset_name: str, data_root: str, train: bool, img_size: i
     elif dataset_name == 'visa':
         return VisA(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
             transform=build_transforms(img_size, transform_type), is_mask=True, **kwargs)
+    elif dataset_name == 'realiad':
+        meta_dir = kwargs.get('meta_dir', None)
+        if meta_dir is None:
+            raise ValueError("meta_dir must be provided for RealIAD dataset.")
+        return RealIAD(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
+            transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs)
     elif dataset_name == 'mvtec_loco':
         return MVTecLOCO(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
             transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs)
@@ -85,6 +92,23 @@ def build_dataset(*, dataset_name: str, data_root: str, train: bool, img_size: i
         for cat in AD2_CLASSES:
             kwargs['category'] = cat
             dss.append(MVTecAD2(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
+                transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs))
+        return ConcatDataset(dss)
+    elif dataset_name == 'mvtec_loco_all':
+        dss = []
+        for cat in LOCO_CLASSES:
+            kwargs['category'] = cat
+            dss.append(MVTecLOCO(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
+                transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs))
+        return ConcatDataset(dss)
+    elif dataset_name == 'realiad_all':
+        meta_dir = kwargs.get('meta_dir', None)
+        if meta_dir is None:
+            raise ValueError("meta_dir must be provided for RealIAD dataset.")
+        dss = []
+        for cat in REALIAD_CLASSES:
+            kwargs['category'] = cat
+            dss.append(RealIAD(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
                 transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs))
         return ConcatDataset(dss)
     else:

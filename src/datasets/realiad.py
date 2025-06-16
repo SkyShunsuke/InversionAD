@@ -10,30 +10,29 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torchvision.transforms import functional as F, InterpolationMode
 
-RIAD_CLASSES = [
-    "metal_nut",
-    "tile",
-    "screw",
-    "zipper",
-    "grid",
-    "pill",
-    "capsule",
-    "transistor",
-    "toothbrush",
-    "cable",
-    "carpet",
-    "wood",
-    "bottle",
-    "leather",
-    "hazelnut"
-]
+# audiojack       eraser     phone_battery   switch         toy_brick    usb_adaptor   zipper
+# bottle_cap      fire_hood  plastic_nut     regulator          terminalblock  transistor1  vcpill
+# button_battery  mint       plastic_plug    rolled_strip_base  toothbrush     u_block      wooden_beads
+# end_cap         pcb        porcelain_doll  sim_card_set       toy            usb          woodstick
 
-class MVTecAD(Dataset):
+REALIAD_CLASSES = [
+    'audiojack', 'bottle_cap', 'button_battery', 'end_cap', 'eraser',
+    'fire_hood', 'mint', 'phone_battery', 'plastic_nut', 'plastic_plug',
+    'pcb', 'porcelain_doll', 'regulator', 'rolled_strip_base',
+    'sim_card_set', 'switch', 'terminalblock', 'toothbrush',
+    'toy', 'toy_brick', 'transistor1', 'u_block', 'usb', 'usb_adaptor',
+    'vcpill', 'wooden_beads', 'woodstick', 'zipper', 'mounts', 'tape'
+]  
+
+NORMAL_PREFIX = 'OK'
+
+class RealIAD(Dataset):
     def __init__(self, 
         data_root: str, 
         category: str, 
         input_res: int, 
         split: str, 
+        meta_dir: str,
         transform: Optional[transforms.Compose] = None,
         is_mask=False, 
         cls_label=False, 
@@ -53,6 +52,7 @@ class MVTecAD(Dataset):
         self.category = category
         self.input_res = input_res
         self.split = split
+        self.meta_dir = meta_dir
         self.custom_transforms = transform
         self.is_mask = is_mask
         self.cls_label = cls_label
@@ -63,8 +63,13 @@ class MVTecAD(Dataset):
         assert self.split == 'train' or self.split == 'test'
         
         # # load files from the dataset
-        self.img_files = self.get_files()
-        self.labels = [0] * len(self.img_files)
+        self.img_files, self.labels_str, self.masks = self.get_files()
+        self.labels = []
+        for label in self.labels_str:
+            if label == NORMAL_PREFIX:
+                self.labels.append(0)
+            else:
+                self.labels.append(1)
         if self.split == 'test':
             self.mask_transform = transforms.Compose(
                 [
@@ -72,39 +77,30 @@ class MVTecAD(Dataset):
                     transforms.ToTensor(),
                 ]
             )
-
-            self.labels = []
-            for file in self.img_files:
-                status = str(file).split(os.path.sep)[-2]
-                if status == 'good':
-                    self.labels.append(0)
-                else:
-                    self.labels.append(1)
-
             self.normal_indices = [i for i, label in enumerate(self.labels) if label == 0]
             self.anom_indices = [i for i, label in enumerate(self.labels) if label == 1]
-        self.num_classes = len(AD_CLASSES)
+        self.num_classes = len(REALIAD_CLASSES)
         
     def __getitem__(self, index):
         inputs = {}
         
         if self.anom_only:
-            img_file = self.img_files[self.anom_indices[index]]
+            img_file = Path(self.img_files[self.anom_indices[index]])
             label = self.labels[self.anom_indices[index]]
         elif self.normal_only:
-            img_file = self.img_files[self.normal_indices[index]]
+            img_file = Path(self.img_files[self.normal_indices[index]])
             label = self.labels[self.normal_indices[index]]
         else:
-            img_file = self.img_files[index]
+            img_file = Path(self.img_files[index])
             label = self.labels[index]
         
-        cls_name = str(img_file).split("/")[-4]
+        cls_name = str(img_file).split("/")[-5]
         with open(img_file, 'rb') as f:
             img = Image.open(f)
             img = img.convert('RGB')
         
         inputs["clsnames"] = cls_name
-        inputs["clslabels"] = AD_CLASSES.index(cls_name)
+        inputs["clslabels"] = REALIAD_CLASSES.index(cls_name)
         inputs["filenames"] = str(img_file)
         
         sample = self.custom_transforms(img)
@@ -115,16 +111,15 @@ class MVTecAD(Dataset):
         else:
             inputs["samples"] = sample
             inputs["labels"] = label
-            if "good" in str(img_file):
+            if self.labels_str[index] == NORMAL_PREFIX:
                 inputs["anom_type"] = "good"
             else:
-                inputs["anom_type"] = str(img_file).split("/")[-2]
+                inputs["anom_type"] = str(img_file).split("/")[-3]
             if self.is_mask:
-                mask_dir =  img_file.parent.parent.parent / 'ground_truth' / img_file.parent.name 
-                mask_file = mask_dir / img_file.name.replace('.png', '_mask.png')
-                if 'good' == img_file.parent.name:
+                if self.labels_str[index] == NORMAL_PREFIX:
                     mask = Image.new('L', (self.input_res, self.input_res), 0)
                 else:
+                    mask_file = self.masks[index]
                     with open(mask_file, 'rb') as f:
                         mask = Image.open(f)
                         mask = mask.convert('L')
@@ -141,18 +136,84 @@ class MVTecAD(Dataset):
             return len(self.img_files)
     
     def get_files(self):
-        if self.split == 'train':
-            files = sorted(Path(os.path.join(self.data_root, self.category, 'train', 'good')).glob('*.png'))
-        elif self.split == 'test':
-            normal_img_files = sorted(Path(os.path.join(self.data_root, self.category, 'test', 'good')).glob('*.png'))
-            anomalous_img_files = []
-            anomalous_dirs = sorted(Path(os.path.join(self.data_root, self.category, 'test')).glob('*'))
-            for anomalous_dir in anomalous_dirs:
-                if "good" in str(anomalous_dir):
-                    continue
-                anomalous_img_files += sorted(anomalous_dir.glob('*.png'))
-            anomalous_img_files = sorted(anomalous_img_files)
-            
-            files = normal_img_files + anomalous_img_files
-        return files
+        # First load meta file 
+        import json
+        meta_file = Path(self.meta_dir) / f"{self.category}.json"
+        if not meta_file.exists():
+            raise FileNotFoundError(f"Meta file {meta_file} does not exist.")
+        with open(meta_file, 'r') as f:
+            meta_data = json.load(f)
+
+        if self.split == "train":
+            train_files = meta_data.get('train', None)
+            if not train_files:
+                raise ValueError(f"No training files found for category {self.category} in meta file.")
+            files = [os.path.join(self.data_root, self.category, self.category, file["image_path"]) for file in train_files]
+            labels = [file["anomaly_class"] for file in train_files]
+            mask_paths = [os.path.join(self.data_root, self.category, self.category, file["mask_path"]) for file in train_files if file["mask_path"]]
+        elif self.split == "test":
+            test_files = meta_data.get('test', None)
+            if not test_files:
+                raise ValueError(f"No test files found for category {self.category} in meta file.")
+            files = [os.path.join(self.data_root, self.category, self.category, file["image_path"]) for file in test_files]
+            labels = [file["anomaly_class"] for file in test_files]
+            mask_paths = []
+            for f in test_files:
+                if f["mask_path"]:
+                    mask_paths.append(os.path.join(self.data_root, self.category, self.category, f["mask_path"]))
+                else:
+                    mask_paths.append(None)
+        else:
+            raise ValueError(f"Unknown split: {self.split}. Expected 'train' or 'test'.")
+        return files, labels, mask_paths
+    
+if __name__ == "__main__":
+    print(len(REALIAD_CLASSES))
+    
+    data_dir = "/newssd/datasets/realiad_1024"
+    category = "audiojack"
+    input_res = 224
+    split = "test"
+    meta_dir = "/newssd/datasets/realiad_meta/realiad_jsons"
+    transform = transforms.Compose([
+        transforms.Resize((input_res, input_res), interpolation=InterpolationMode.BICUBIC),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    dataset = RealIAD(
+        data_root=data_dir,
+        category=category,
+        input_res=input_res,
+        split=split,
+        meta_dir=meta_dir,
+        transform=transform,
+        is_mask=True,
+        cls_label=True,
+        anom_only=False,
+        normal_only=False
+    )
+    print(f"{len(dataset.masks)}")
+    print(f"{len(dataset.img_files)}")
+    print(f"{len(dataset.labels)}")
+    
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=4)
+    
+    print(dataset.masks)
+    
+    for i in range(len(dataset)):
+        if dataset.labels[i] == 0:
+            continue
+        else:
+            assert dataset.masks[i] is not None, f"Mask for index {i} is None"
+            print(f"Index {i}: {dataset.img_files[i]}, Label: {dataset.labels[i]}, Mask: {dataset.masks[i]}")
+    
+    for batch in loader:
+        print(batch["clsnames"], batch["clslabels"], batch["filenames"])
+        if "masks" in batch:
+            print("Masks available")
+        else:
+            print("No masks available")
+        break  # Just to test one batch
+    print(f"Dataset length: {len(dataset)}")
+    print(f"Sample item: {dataset[0]}")
     
