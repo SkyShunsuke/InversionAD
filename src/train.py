@@ -19,7 +19,7 @@ from datasets import build_dataset
 from utils import get_optimizer, get_lr_scheduler
 from denoiser import get_denoiser, Denoiser
 from backbones import get_backbone
-from evaluate import evaluate
+from evaluate import evaluate_inv
 
 from einops import rearrange
 from sklearn.metrics import roc_curve, roc_auc_score
@@ -186,7 +186,7 @@ def main(args):
             print(f"Model is saved at {save_dir}")
         
         if (epoch + 1) % config["evaluation"]["eval_interval"] == 0:
-            current_auc = evaluate(
+            current_auc = evaluate_inv(
                 model,
                 feature_extractor,
                 anom_loader,

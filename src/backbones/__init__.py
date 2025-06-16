@@ -10,8 +10,52 @@ from torchvision.models import VGG19_Weights, EfficientNet_V2_S_Weights, Efficie
 from .efficientnet import build_efficient
 from .resnet import wide_resnet101_2, wide_resnet50_2, resnet50
 
+from einops import rearrange
+
+class DINOv2Wrapper(nn.Module):
+    def __init__(self, model, out_blocks=None, out_res=None, **kwargs):
+        super(DINOv2Wrapper, self).__init__()
+        self.model = model
+        self.out_blocks = out_blocks if out_blocks is not None else [-1]
+        self.out_res = out_res if out_res is not None else (16, 16)  # Default shape for DINOv2 Base
+    
+    def forward(self, x):
+        """
+        Forward pass through the DINOv2 model.
+        Args:
+            x (torch.Tensor): Input tensor of shape (B, C, H, W).
+        Returns:
+            torch.Tensor: Output features from the specified blocks.
+        """
+        outputs = self.model(x)
+        hidden_states = outputs.hidden_states
+        out_features = []
+        for blk in self.out_blocks:
+            state = hidden_states[blk][:, 1:]
+            state = rearrange(state, 'b (h w) c -> b c h w', h=self.out_res[0], w=self.out_res[1])
+            out_features.append(state)
+        out = torch.cat(out_features, dim=1)
+        return out, out_features
+        
+def get_backbone_feature_shape(model_type):
+    if model_type == "efficientnet-b4":
+        return (272, 16, 16)
+    elif model_type == "dinov2-base":
+        return (768, 16, 16)
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")
+
 def get_efficientnet(model_name, **kwargs):
     return build_efficient(model_name, **kwargs)
+
+def get_dinov2(model_name, **kwargs):
+    if model_name == "dinov2-base":
+        from transformers import Dinov2Model
+        model = Dinov2Model.from_pretrained("facebook/dinov2-base", output_hidden_states=True).eval()
+        model = DINOv2Wrapper(model, **kwargs)
+        return model
+    else:
+        raise ValueError(f"Unsupported model name: {model_name}")
 
 def get_pdn_small(out_channels=384, padding=False, **kwargs):
     pad_mult = 1 if padding else 0
@@ -76,6 +120,9 @@ def get_backbone(**kwargs):
         # net = get_efficientnet(model_name, pretrained=True, outblocks=[1, 5, 9, 21], outstrides=[2, 4, 8, 16])
         net =  get_efficientnet(model_name, **kwargs)
         return BackboneWrapper(net, [0.125, 0.25, 0.5, 1.0])
+    elif 'dinov2' in model_name:
+        net = get_dinov2(model_name, **kwargs)
+        return net
     elif 'vgg' in model_name:
         return BackboneModel(model_name, [3, 8, 17, 26])
     elif 'wide_resnet50_2' in model_name:

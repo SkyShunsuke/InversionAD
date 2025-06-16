@@ -13,7 +13,6 @@ from pathlib import Path
 import copy
 import argparse
 import yaml
-from pprint import pprint
 
 from datasets import build_dataset
 from utils import get_optimizer, get_lr_scheduler
@@ -23,11 +22,19 @@ from backbones import get_backbone
 from einops import rearrange
 from sklearn.metrics import roc_curve, roc_auc_score
 
+from torch.utils.data import ConcatDataset
+
+import logging
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logger = logging.getLogger()
+
 def parse_args():
     parser = argparse.ArgumentParser(description="InversionAD Inference")
     
+    parser.add_argument('--eval_strategy', type=str, default='inversion', choices=['inversion', 'reconstruction'], help='Evaluation strategy: inversion or reconstruction')
     parser.add_argument('--save_dir', type=str, default=None, help='Path to the directory contais results')
     parser.add_argument('--eval_step', type=int, default=-1, help='Number of steps for evaluation')
+    parser.add_argument('--noise_step', type=int, default=8, help='Number of noise steps for evaluation')
     parser.add_argument('--use_ema_model', action='store_true', help='Use EMA model for evaluation')
     args = parser.parse_args()
     return args
@@ -69,11 +76,10 @@ def main(args):
             try:
                 config = yaml.safe_load(stream)
             except yaml.YAMLError as exc:
-                print(exc)
+                logger.info(exc)
         return config
     
     config = load_config(config_path)
-    pprint(config)
 
     dataset_config = config['data']
     device = config['meta']['device']
@@ -84,15 +90,24 @@ def main(args):
     dataset_config['anom_only'] = False
     dataset_config['normal_only'] = True
     normal_dataset = build_dataset(**dataset_config)
-    anom_loader = DataLoader(anom_dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=False)
-    normal_loader = DataLoader(normal_dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=False)
     
-    diff_in_sh = config['backbone']['feature_shape']
+    is_multi_class = isinstance(normal_dataset, ConcatDataset) or isinstance(anom_dataset, ConcatDataset)
+    if is_multi_class:
+        logger.info(f"Using multi-class dataset")
+        anom_loader = [DataLoader(anom_ds, batch_size=1, shuffle=False, num_workers=1, drop_last=False) for anom_ds in anom_dataset.datasets]
+        normal_loader = [DataLoader(normal_ds, batch_size=1, shuffle=False, num_workers=1, drop_last=False) for normal_ds in normal_dataset.datasets]
+    else:
+        logger.info(f"Using single-class dataset: {anom_dataset.category}")
+        # Single class dataset
+        anom_loader = [DataLoader(anom_dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=False)]
+        normal_loader = [DataLoader(normal_dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=False)]
+    
+    diff_in_sh = (272, 16, 16)  # For EfficientNet-b4
     model: Denoiser = get_denoiser(**config['diffusion'], input_shape=diff_in_sh)
     model.to(device).eval()
 
     backbone_kwargs = config['backbone']
-    print(f"Using feature space reconstruction with {backbone_kwargs['model_type']} backbone")
+    logger.info(f"Using feature space reconstruction with {backbone_kwargs['model_type']} backbone")
     
     feature_extractor = get_backbone(**backbone_kwargs)
     feature_extractor.to(device).eval()
@@ -103,22 +118,47 @@ def main(args):
     else:
         checkpoint_path = os.path.join(args.save_dir, 'model_latest.pth')
     
-    model_ckpt = torch.load(checkpoint_path, map_location=device)
+    model_ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    if is_multi_class:
+        # for distributed training, the model state dict keys may have a prefix
+        # Remove the prefix if it exists
+        if 'module.' in list(model_ckpt.keys())[0]:
+            model_ckpt = {k.replace('module.', ''): v for k, v in model_ckpt.items()}
     model.load_state_dict(model_ckpt, strict=True)
-    print(f"Loaded model from {checkpoint_path}")
+    logger.info(f"Loaded model from {checkpoint_path}")
     
-    auc = evaluate(
-        model,
-        feature_extractor,
-        anom_loader,
-        normal_loader,
-        config, 
-        diff_in_sh,
-        "Eval",
-        config["evaluation"]["eval_step"] if args.eval_step == -1 else args.eval_step,
-        device,
-    )
-    print(f"AUC: {auc}")
+    if args.eval_strategy == 'reconstruction':
+        logger.info("Evaluating reconstruction performance")
+        assert args.noise_step < args.eval_step, "Noise step should be less than evaluation step for reconstruction"
+        auc_dict = evaluate_recon(
+            model,
+            feature_extractor,
+            anom_loader,
+            normal_loader,
+            config, 
+            diff_in_sh,
+            "Eval",
+            args.eval_step if args.eval_step != -1 else config["evaluation"]["eval_step"],
+            args.noise_step,
+            device
+        )
+    elif args.eval_strategy == 'inversion':
+        auc_dict = evaluate_inv(
+            model,
+            feature_extractor,
+            anom_loader,
+            normal_loader,
+            config, 
+            diff_in_sh,
+            "Eval",
+            config["evaluation"]["eval_step"] if args.eval_step == -1 else args.eval_step,
+            device,
+        )
+    logger.info(f"{auc_dict}")
+    # Compute Average AUC
+    if is_multi_class:
+        avg_auc = np.mean(list(auc_dict.values()))
+        logger.info(f"Average AUC: {avg_auc}")
     
     
 def init_denoiser(num_inference_steps, device, config, in_sh, inherit_model=None):
@@ -137,15 +177,211 @@ def calculate_log_pdf(x):
     return ll
 
 @torch.no_grad()
-def evaluate(denoiser, feature_extractor, anom_loader, normal_loader, config, in_sh, epoch, eval_step, device):
+def evaluate_recon(denoiser, feature_extractor, anom_loaders, normal_loaders, config, in_sh, epoch, eval_step, noise_step, device):
     denoiser.eval()
     feature_extractor.eval()
     
     eval_denoiser = init_denoiser(eval_step, device, config, in_sh, inherit_model=denoiser)
+    roc_dict = {}
+    for normal_loader, anom_loader in zip(normal_loaders, anom_loaders):
+        category = anom_loader.dataset.category if hasattr(anom_loader.dataset, 'category') else 'unknown'
+        logger.info(f"[{category}] Evaluating on {len(anom_loader)} anomalous samples and {len(normal_loader)} normal samples")
+        logger.info(f"[{category}] Evaluation step: {eval_step}")
+        logger.info(f"[{category}] Epoch: {epoch}")
+        
+        losses = []
+        mses = []
+        mses_sp = []
+        noise_steps = torch.tensor([noise_step] * 1, device=device, dtype=torch.long)
+        noise = torch.randn((1, *in_sh), device=device, dtype=torch.float32)
+        for i, batch in enumerate(normal_loader):
+            images = batch["samples"].to(device)
+            labels = batch["clslabels"].to(device)
+            
+            features, features_list = feature_extractor(images)
+            loss = denoiser(features, labels)
+            losses.append(loss.cpu().numpy())
+            
+            # Perturb to x_t
+            x_t = eval_denoiser.q_sample(features, noise_steps, noise=noise)
+            
+            # Reconstruct
+            x_rec = eval_denoiser.denoise_from_intermediate(x_t, noise_steps, labels, sampler="ddim")
+            
+            mse = torch.mean((x_rec - features) ** 2, dim=(1, 2, 3))  # (bs, )
+            min_mse_spatial = mse.view(mse.shape[0], -1).min(dim=1)[0]  # (bs, )
+            max_mse_spatial = mse.view(mse.shape[0], -1).max(dim=1)[0]  # (bs, )
+            mse_sp = torch.abs(min_mse_spatial - max_mse_spatial)  # (bs, )
+            mses_sp.extend(mse_sp.cpu().numpy())
+            mses.extend(mse.cpu().numpy())
+        
+        for i, batch in enumerate(anom_loader):
+            images = batch["samples"].to(device)
+            labels = batch["clslabels"].to(device)
+            
+            features, features_list = feature_extractor(images)
+            loss = denoiser(features, labels)
+            losses.append(loss.cpu().numpy())
+            
+            # Perturb to x_t
+            x_t = eval_denoiser.q_sample(features, noise_steps, noise=noise)
+            
+            # Reconstruct
+            x_rec = eval_denoiser.denoise_from_intermediate(x_t, noise_steps, labels, sampler="ddim")
+            
+            mse = torch.mean((x_rec - features) ** 2, dim=(1, 2, 3))
+            min_mse_spatial = mse.view(mse.shape[0], -1).min(dim=1)[0]  # (bs, )
+            max_mse_spatial = mse.view(mse.shape[0], -1).max(dim=1)[0]  # (bs, )
+            mse_sp = torch.abs(min_mse_spatial - max_mse_spatial)  # (bs, )
+            mses_sp.extend(mse_sp.cpu().numpy())
+            mses.extend(mse.cpu().numpy())
+            
+        losses = np.array(losses)
+        logger.info(f"[{category}] Loss: {losses.mean()} at epoch {epoch}")
+        mses = np.array(mses)
+        logger.info(f"[{category}] MSE: {mses.mean()} at epoch {epoch}")
+        
+        normal_mses = mses[:len(normal_loader.dataset)]
+        anomaly_mses = mses[len(normal_loader.dataset):]
+        normal_mses_sp = mses_sp[:len(normal_loader.dataset)]
+        anomaly_mses_sp = mses_sp[len(normal_loader.dataset):]
+        normal_mses = np.array(normal_mses)
+        anomaly_mses = np.array(anomaly_mses)
+        normal_mses_sp = np.array(normal_mses_sp)
+        anomaly_mses_sp = np.array(anomaly_mses_sp)
+        mses_min = np.min([normal_mses.min(), anomaly_mses.min()])
+        mses_max = np.max([normal_mses.max(), anomaly_mses.max()])
+        mses_sp_min = np.min([normal_mses_sp.min(), anomaly_mses_sp.min()])
+        mses_sp_max = np.max([normal_mses_sp.max(), anomaly_mses_sp.max()])
+        eps = 1e-8
+        normal_mses = (normal_mses - mses_min) / (mses_max - mses_min + eps)
+        anomaly_mses = (anomaly_mses - mses_min) / (mses_max - mses_min + eps)
+        normal_mses_sp = (normal_mses_sp - mses_sp_min) / (mses_sp_max - mses_sp_min + eps)
+        anomaly_mses_sp = (anomaly_mses_sp - mses_sp_min) / (mses_sp_max - mses_sp_min + eps)
+
+        y_true = np.concatenate([np.zeros(len(normal_mses)), np.ones(len(anomaly_mses))])
+        normal_scores = normal_mses + normal_mses_sp
+        anomaly_scores = anomaly_mses + anomaly_mses_sp
+        y_score = np.concatenate([normal_scores, anomaly_scores])
+        from sklearn.metrics import roc_auc_score
     
-    print(f"Evaluating on {len(anom_loader)} anomalous samples and {len(normal_loader)} normal samples")
-    print(f"Evaluation step: {eval_step}")
-    print(f"Epoch: {epoch}")
+        roc_auc = roc_auc_score(y_true, y_score)
+        roc_dict[category] = roc_auc
+        
+        logger.info(f"[{category}] AUC: {roc_auc} at epoch {epoch}")
+        
+    logger.info(f"Evaluation completed for all categories.")
+    return roc_dict
+
+@torch.no_grad()
+def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, config, in_sh, epoch, eval_step, device):
+    denoiser.eval()
+    feature_extractor.eval()
+    
+    eval_denoiser = init_denoiser(eval_step, device, config, in_sh, inherit_model=denoiser)
+    roc_dict = {}
+    for normal_loader, anom_loader in zip(normal_loaders, anom_loaders):
+        category = anom_loader.dataset.category if hasattr(anom_loader.dataset, 'category') else 'unknown'
+        logger.info(f"[{category}] Evaluating on {len(anom_loader)} anomalous samples and {len(normal_loader)} normal samples")
+        logger.info(f"[{category}] Evaluation step: {eval_step}")
+        logger.info(f"[{category}] Epoch: {epoch}")
+    
+        start_t = torch.tensor([0] * 8, device=device, dtype=torch.long)
+        normal_ats = []
+        normal_nlls = []
+        losses = []
+        for i, batch in enumerate(normal_loader):
+            images = batch["samples"].to(device)
+            labels = batch["clslabels"].to(device)
+            
+            features, features_list = feature_extractor(images)
+            loss = denoiser(features, labels)
+            losses.append(loss.cpu().numpy())
+            latents_last = eval_denoiser.ddim_reverse_sample(
+                features, start_t, labels, eta=0.0
+            )
+            latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
+            ats = torch.abs(latents_last_l2 - torch.sqrt(torch.tensor([0], device=device, dtype=torch.float32))) 
+            min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]  # (bs, )
+            max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]  # (bs, )
+            ats = torch.abs(min_ats_spatial - max_ats_spatial)  # (bs, )
+            nll = calculate_log_pdf(latents_last.cpu()) * -1
+        
+            normal_nlls.extend(nll.cpu().numpy())
+            normal_ats.extend(ats.cpu().numpy())
+        
+        anomaly_ats = []
+        anomaly_nlls = []
+        for i, batch in enumerate(anom_loader):
+            images = batch["samples"].to(device)
+            labels = batch["clslabels"].to(device)
+            
+            features, features_list = feature_extractor(images)
+            loss = denoiser(features, labels)
+            losses.append(loss.cpu().numpy())
+            latents_last = eval_denoiser.ddim_reverse_sample(
+                features, start_t, labels, eta=0.0
+            )
+            latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
+            ats = torch.abs(latents_last_l2 - torch.sqrt(torch.tensor([0], device=device, dtype=torch.float32))) 
+            min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]
+            max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]
+            ats = torch.abs(min_ats_spatial - max_ats_spatial)
+            nll = calculate_log_pdf(latents_last.cpu()) * -1
+            
+            anomaly_nlls.extend(nll.cpu().numpy())
+            anomaly_ats.extend(ats.cpu().numpy())
+        
+        losses = np.array(losses)
+        logger.info(f"[{category}] Loss: {losses.mean()} at epoch {epoch}")
+        
+        normal_ats = np.array(normal_ats)
+        anomaly_ats = np.array(anomaly_ats)
+        normal_nlls = np.array(normal_nlls)
+        anomaly_nlls = np.array(anomaly_nlls)
+        
+
+        ats_min = np.min([normal_ats.min(), anomaly_ats.min()])
+        ats_max = np.max([normal_ats.max(), anomaly_ats.max()])
+        nlls_min = np.min([normal_nlls.min(), anomaly_nlls.min()])
+        nlls_max = np.max([normal_nlls.max(), anomaly_nlls.max()])
+        eps = 1e-8  # Small constant to avoid division by zero
+        normal_ats = (normal_ats - ats_min) / (ats_max - ats_min + eps) 
+        anomaly_ats = (anomaly_ats - ats_min) / (ats_max - ats_min + eps) 
+        normal_nlls = (normal_nlls - nlls_min) / (nlls_max - nlls_min + eps)
+        anomaly_nlls = (anomaly_nlls - nlls_min) / (nlls_max - nlls_min + eps)
+
+        y_true = np.concatenate([np.zeros(len(normal_ats)), np.ones(len(anomaly_ats))])
+        normal_scores = normal_ats + normal_nlls
+        anomaly_scores = anomaly_ats + anomaly_nlls
+        y_score = np.concatenate([normal_scores, anomaly_scores])
+        
+        roc_auc = roc_auc_score(y_true, y_score)
+        roc_dict[category] = roc_auc
+        
+        logger.info(f"[{category}] AUC: {roc_auc} at epoch {epoch}")
+        
+    logger.info(f"Evaluation completed for all categories.")
+    return roc_dict
+
+import torch.distributed as dist
+@torch.no_grad()
+def concat_all_gather(tensor, world_size):
+    tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
+    dist.all_gather(tensor_list, tensor.contiguous())
+    return torch.cat(tensor_list, dim=0)
+
+@torch.no_grad()
+def evaluate_dist(denoiser, feature_extractor, anom_loader, normal_loader, config, in_sh, epoch, eval_step, device, world_size, rank):
+    denoiser.eval()
+    feature_extractor.eval()
+    category = anom_loader.dataset.category
+    
+    eval_denoiser = init_denoiser(eval_step, device, config, in_sh, inherit_model=denoiser)
+    
+    logger.info(f"[{category}] Evaluating on {len(anom_loader)} anomalous samples and {len(normal_loader)} normal samples")
+    logger.info(f"[{category}] Evaluation step: {eval_step}")
+    logger.info(f"[{category}] Epoch: {epoch}")
     
     start_t = torch.tensor([0] * 8, device=device, dtype=torch.long)
     normal_ats = []
@@ -166,10 +402,11 @@ def evaluate(denoiser, feature_extractor, anom_loader, normal_loader, config, in
         min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]  # (bs, )
         max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]  # (bs, )
         ats = torch.abs(min_ats_spatial - max_ats_spatial)  # (bs, )
-        nll = calculate_log_pdf(latents_last.cpu()) * -1
+        nll = calculate_log_pdf(latents_last) * -1
     
-        normal_nlls.extend(nll.cpu().numpy())
-        normal_ats.extend(ats.cpu().numpy())
+        normal_nlls.append(nll)
+        normal_ats.append(ats)
+    dist.barrier()  # Ensure all processes have completed the normal data processing
         
     anomaly_ats = []
     anomaly_nlls = []
@@ -188,19 +425,29 @@ def evaluate(denoiser, feature_extractor, anom_loader, normal_loader, config, in
         min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]
         max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]
         ats = torch.abs(min_ats_spatial - max_ats_spatial)
-        nll = calculate_log_pdf(latents_last.cpu()) * -1
+        nll = calculate_log_pdf(latents_last) * -1
         
-        anomaly_nlls.extend(nll.cpu().numpy())
-        anomaly_ats.extend(ats.cpu().numpy())
+        anomaly_nlls.append(nll)
+        anomaly_ats.append(ats)
+    dist.barrier()  # Ensure all processes have completed the anomaly data processing
     
     losses = np.array(losses)
-    print(f"Loss: {losses.mean()} at epoch {epoch}")
+    logger.info(f"[{category}] Loss: {losses.mean()} at epoch {epoch}")
     
-    normal_ats = np.array(normal_ats)
-    anomaly_ats = np.array(anomaly_ats)
-    normal_nlls = np.array(normal_nlls)
-    anomaly_nlls = np.array(anomaly_nlls)
+    normal_ats = torch.cat(normal_ats, dim=0)  
+    anomaly_ats = torch.cat(anomaly_ats, dim=0)
+    normal_nlls = torch.cat(normal_nlls, dim=0)
+    anomaly_nlls = torch.cat(anomaly_nlls, dim=0)
     
+    # Gather results from all processes
+    def to_numpy(tensor):
+        return tensor.cpu().numpy() if tensor.is_cuda else tensor.numpy()
+    normal_ats = to_numpy(concat_all_gather(normal_ats, world_size))
+    anomaly_ats = to_numpy(concat_all_gather(anomaly_ats, world_size))
+    normal_nlls = to_numpy(concat_all_gather(normal_nlls, world_size))
+    anomaly_nlls = to_numpy(concat_all_gather(anomaly_nlls, world_size))
+    if rank != 0:
+        return None
 
     ats_min = np.min([normal_ats.min(), anomaly_ats.min()])
     ats_max = np.max([normal_ats.max(), anomaly_ats.max()])

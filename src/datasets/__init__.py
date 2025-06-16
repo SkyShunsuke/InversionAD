@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader, ConcatDataset
 
 from .mnist import MNISTWrapper
 from .mvtec_ad import MVTecAD, AD_CLASSES
+from .mvtec_ad2 import MVTecAD2, AD2_CLASSES
 from .mvtec_loco import MVTecLOCO, LOCO_CLASSES
 from .visa import VisA, VISA_CLASSES
 
@@ -56,25 +57,35 @@ def build_dataset(*, dataset_name: str, data_root: str, train: bool, img_size: i
     elif dataset_name == 'mvtec_ad':
         return MVTecAD(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
             transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs)
+    elif dataset_name == 'mvtec_ad2':
+        return MVTecAD2(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
+            transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs)
     elif dataset_name == 'visa':
         return VisA(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
             transform=build_transforms(img_size, transform_type), is_mask=True, **kwargs)
     elif dataset_name == 'mvtec_loco':
         return MVTecLOCO(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
             transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs)
-    elif dataset_name == 'mvtec_ad_mc':
+    elif dataset_name == 'mvtec_ad_all':
         dss = []
         for cat in AD_CLASSES:
             kwargs['category'] = cat
             dss.append(MVTecAD(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
                 transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs))
         return ConcatDataset(dss)
-    elif dataset_name == 'visa_mc':
+    elif dataset_name == 'visa_all':
         dss = []
         for cat in VISA_CLASSES:
             kwargs['category'] = cat
             dss.append(VisA(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
                 transform=build_transforms(img_size, transform_type), **kwargs))
+        return ConcatDataset(dss)
+    elif dataset_name == 'mvtec_ad2_all':
+        dss = []
+        for cat in AD2_CLASSES:
+            kwargs['category'] = cat
+            dss.append(MVTecAD2(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
+                transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs))
         return ConcatDataset(dss)
     else:
         raise ValueError(f"Invalid dataset: {dataset_name}")
