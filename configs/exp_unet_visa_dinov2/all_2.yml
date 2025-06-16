@@ -20,8 +20,8 @@ backbone:
 data:
   batch_size: 8
   category: all
-  data_root: data/mvtec_ad
-  dataset_name: mvtec_ad_all
+  data_root: data/visa
+  dataset_name: visa_all
   img_size: 224
   multi_category: false
   num_normal_samples: -1
@@ -43,7 +43,7 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_unet_ad_dinov2_base_d8/all'
+  save_dir: 'results/exp_unet_visa_dinov2_base_d8/all'
 evaluation:
   eval_interval: 50
   eval_step: 4

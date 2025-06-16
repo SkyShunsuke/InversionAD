@@ -20,8 +20,8 @@ backbone:
 data:
   batch_size: 8
   category: all
-  data_root: data/mvtec_ad
-  dataset_name: mvtec_ad_all
+  data_root: data/visa
+  dataset_name: visa_all
   img_size: 224
   multi_category: false
   num_normal_samples: -1
