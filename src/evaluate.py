@@ -23,6 +23,7 @@ from einops import rearrange
 from sklearn.metrics import roc_curve, roc_auc_score
 
 from torch.utils.data import ConcatDataset
+from torch.nn import functional as F
 
 import logging
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -176,6 +177,12 @@ def calculate_log_pdf(x):
     ll = ll.sum(dim=(1, 2, 3))
     return ll
 
+def calculate_log_pdf_spatial(x):
+    # Calculate log pdf for each spatial dimension
+    ll = -0.5 * (x ** 2 + np.log(2 * np.pi))
+    ll = ll.sum(dim=1)  # Sum over the channel dimension
+    return ll
+
 @torch.no_grad()
 def evaluate_recon(denoiser, feature_extractor, anom_loaders, normal_loaders, config, in_sh, epoch, eval_step, noise_step, device):
     denoiser.eval()
@@ -282,6 +289,8 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
     roc_dict = {}
     for normal_loader, anom_loader in zip(normal_loaders, anom_loaders):
         category = anom_loader.dataset.category if hasattr(anom_loader.dataset, 'category') else 'unknown'
+        if category not in roc_dict:
+            roc_dict[category] = {}
         logger.info(f"[{category}] Evaluating on {len(anom_loader)} anomalous samples and {len(normal_loader)} normal samples")
         logger.info(f"[{category}] Evaluation step: {eval_step}")
         logger.info(f"[{category}] Epoch: {epoch}")
@@ -289,10 +298,14 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         start_t = torch.tensor([0] * 8, device=device, dtype=torch.long)
         normal_ats = []
         normal_nlls = []
+        normal_maps = []
+        normal_gt_masks = []
         losses = []
         for i, batch in enumerate(normal_loader):
             images = batch["samples"].to(device)
+            org_h, org_w = images.shape[2], images.shape[3]
             labels = batch["clslabels"].to(device)
+            normal_gt_masks.append(batch["masks"])
             
             features, features_list = feature_extractor(images)
             loss = denoiser(features, labels)
@@ -306,15 +319,20 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
             max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]  # (bs, )
             ats = torch.abs(min_ats_spatial - max_ats_spatial)  # (bs, )
             nll = calculate_log_pdf(latents_last.cpu()) * -1
-        
+
+            normal_map = F.interpolate(latents_last_l2.unsqueeze(0), size=(org_h, org_w), mode='bilinear', align_corners=False).squeeze(0)
+            normal_maps.append(normal_map.cpu().numpy())
             normal_nlls.extend(nll.cpu().numpy())
             normal_ats.extend(ats.cpu().numpy())
         
         anomaly_ats = []
         anomaly_nlls = []
+        anomaly_maps = []
+        anomaly_gt_masks = []
         for i, batch in enumerate(anom_loader):
             images = batch["samples"].to(device)
             labels = batch["clslabels"].to(device)
+            anomaly_gt_masks.append(batch["masks"])
             
             features, features_list = feature_extractor(images)
             loss = denoiser(features, labels)
@@ -329,6 +347,8 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
             ats = torch.abs(min_ats_spatial - max_ats_spatial)
             nll = calculate_log_pdf(latents_last.cpu()) * -1
             
+            anomaly_map = F.interpolate(latents_last_l2.unsqueeze(0), size=(org_h, org_w), mode='bilinear', align_corners=False).squeeze(0)
+            anomaly_maps.append(anomaly_map.cpu().numpy())
             anomaly_nlls.extend(nll.cpu().numpy())
             anomaly_ats.extend(ats.cpu().numpy())
         
@@ -339,7 +359,10 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         anomaly_ats = np.array(anomaly_ats)
         normal_nlls = np.array(normal_nlls)
         anomaly_nlls = np.array(anomaly_nlls)
-        
+        normal_maps = np.concatenate(normal_maps, axis=0)
+        anomaly_maps = np.concatenate(anomaly_maps, axis=0)
+        normal_gt_masks = torch.cat(normal_gt_masks, dim=0)
+        anomaly_gt_masks = torch.cat(anomaly_gt_masks, dim=0)
 
         ats_min = np.min([normal_ats.min(), anomaly_ats.min()])
         ats_max = np.max([normal_ats.max(), anomaly_ats.max()])
@@ -351,15 +374,29 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         normal_nlls = (normal_nlls - nlls_min) / (nlls_max - nlls_min + eps)
         anomaly_nlls = (anomaly_nlls - nlls_min) / (nlls_max - nlls_min + eps)
 
+        # Calculate Image-AUC
         y_true = np.concatenate([np.zeros(len(normal_ats)), np.ones(len(anomaly_ats))])
         normal_scores = normal_ats + normal_nlls
         anomaly_scores = anomaly_ats + anomaly_nlls
         y_score = np.concatenate([normal_scores, anomaly_scores])
         
         roc_auc = roc_auc_score(y_true, y_score)
-        roc_dict[category] = roc_auc
+        roc_dict[category]["img"] = roc_auc
         
-        logger.info(f"[{category}] AUC: {roc_auc} at epoch {epoch}")
+        # Calculate Pixel-AUC
+        y_true_px = np.concatenate([
+            normal_gt_masks.cpu().numpy().flatten(),
+            anomaly_gt_masks.cpu().numpy().flatten()
+        ])
+        y_score_px = np.concatenate([
+            normal_maps.flatten(),
+            anomaly_maps.flatten()
+        ])
+        roc_auc_px = roc_auc_score(y_true_px, y_score_px)
+        roc_dict[category]["px"] = roc_auc_px
+        
+        logger.info(f"[{category}] Image AUC: {roc_auc} at epoch {epoch}")
+        logger.info(f"[{category}] Pixel AUC: {roc_auc_px} at epoch {epoch}")
         
     logger.info(f"Evaluation completed for all categories.")
     return roc_dict

@@ -68,7 +68,7 @@ class MVTecAD(Dataset):
         if self.split == 'test':
             self.mask_transform = transforms.Compose(
                 [
-                    transforms.Resize(input_res),
+                    transforms.Resize(input_res, interpolation=InterpolationMode.NEAREST),
                     transforms.ToTensor(),
                 ]
             )

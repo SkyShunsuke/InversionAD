@@ -57,7 +57,7 @@ class MVTecLOCO(Dataset):
         self.labels = [0] * len(self.img_files)
         self.mask_transform = transforms.Compose(
             [
-                transforms.Resize(input_res),
+                transforms.Resize(input_res, interpolation=InterpolationMode.NEAREST),
                 transforms.ToTensor(),
             ]
         )
