@@ -23,7 +23,11 @@ from einops import rearrange
 from sklearn.metrics import roc_curve, roc_auc_score
 
 from torch.utils.data import ConcatDataset
+from torch.utils.data.distributed import DistributedSampler
 from torch.nn import functional as F
+
+MAX_BATCH_SIZE = 32
+NUM_WORKERS = 4
 
 import logging
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -37,6 +41,7 @@ def parse_args():
     parser.add_argument('--eval_step', type=int, default=-1, help='Number of steps for evaluation')
     parser.add_argument('--noise_step', type=int, default=8, help='Number of noise steps for evaluation')
     parser.add_argument('--use_ema_model', action='store_true', help='Use EMA model for evaluation')
+    parser.add_argument('--distributed', action='store_true', help='Use distributed evaluation')
     args = parser.parse_args()
     return args
 
@@ -95,13 +100,50 @@ def main(args):
     is_multi_class = isinstance(normal_dataset, ConcatDataset) or isinstance(anom_dataset, ConcatDataset)
     if is_multi_class:
         logger.info(f"Using multi-class dataset")
-        anom_loader = [DataLoader(anom_ds, batch_size=1, shuffle=False, num_workers=1, drop_last=False) for anom_ds in anom_dataset.datasets]
-        normal_loader = [DataLoader(normal_ds, batch_size=1, shuffle=False, num_workers=1, drop_last=False) for normal_ds in normal_dataset.datasets]
+        anom_loader = [
+            DataLoader(
+                anom_ds,
+                batch_size=MAX_BATCH_SIZE,
+                shuffle=False,
+                num_workers=NUM_WORKERS,
+                drop_last=False,
+                sampler=DistributedSampler(anom_ds, shuffle=False)
+            )
+            for anom_ds in anom_dataset.datasets
+        ]
+        normal_loader = [
+            DataLoader(
+                normal_ds,
+                batch_size=MAX_BATCH_SIZE,
+                shuffle=False,
+                num_workers=NUM_WORKERS,
+                drop_last=False,
+                sampler=DistributedSampler(normal_ds, shuffle=False)
+            )
+            for normal_ds in normal_dataset.datasets
+        ]
     else:
         logger.info(f"Using single-class dataset: {anom_dataset.category}")
-        # Single class dataset
-        anom_loader = [DataLoader(anom_dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=False)]
-        normal_loader = [DataLoader(normal_dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=False)]
+        anom_loader = [
+            DataLoader(
+                anom_dataset,
+                batch_size=MAX_BATCH_SIZE,
+                shuffle=False,
+                num_workers=NUM_WORKERS,
+                drop_last=False,
+                sampler=DistributedSampler(anom_dataset, shuffle=False)
+            )
+        ]
+        normal_loader = [
+            DataLoader(
+                normal_dataset,
+                batch_size=MAX_BATCH_SIZE,
+                shuffle=False,
+                num_workers=NUM_WORKERS,
+                drop_last=False,
+                sampler=DistributedSampler(normal_dataset, shuffle=False)
+            )
+        ]
     
     diff_in_sh = (272, 16, 16)  # For EfficientNet-b4
     model: Denoiser = get_denoiser(**config['diffusion'], input_shape=diff_in_sh)
@@ -155,6 +197,7 @@ def main(args):
             config["evaluation"]["eval_step"] if args.eval_step == -1 else args.eval_step,
             device,
         )
+            
     logger.info(f"{auc_dict}")
     # Compute Average AUC
     if is_multi_class:
@@ -301,7 +344,7 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         normal_maps = []
         normal_gt_masks = []
         losses = []
-        for i, batch in enumerate(normal_loader):
+        for i, batch in tqdm(enumerate(normal_loader), total=len(normal_loader)):
             images = batch["samples"].to(device)
             org_h, org_w = images.shape[2], images.shape[3]
             labels = batch["clslabels"].to(device)
@@ -329,7 +372,7 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         anomaly_nlls = []
         anomaly_maps = []
         anomaly_gt_masks = []
-        for i, batch in enumerate(anom_loader):
+        for i, batch in tqdm(enumerate(anom_loader), total=len(anom_loader)):
             images = batch["samples"].to(device)
             labels = batch["clslabels"].to(device)
             anomaly_gt_masks.append(batch["masks"])

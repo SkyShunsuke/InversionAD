@@ -76,7 +76,6 @@ def create_denising_model(
             class_dropout_prob=class_dropout_prob,
             num_classes=num_classes,
             learn_sigma=learn_sigma,
-            conditioning_scheme=conditioning_scheme,
             pos_embed=pos_embed
         )
     else:

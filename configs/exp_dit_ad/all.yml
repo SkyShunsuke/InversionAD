@@ -1,10 +1,10 @@
 diffusion:
-  model_type: 'unet'
+  model_type: 'dit'
   num_classes: 15
   target_channels: 3
   z_channels: 768
-  depth: 2
-  width: 256
+  depth: 8
+  width: 1024
   num_sampling_steps: '100'
   ema_decay: 0.999
   learn_sigma: false
@@ -51,7 +51,7 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_unet_ad_enet_cond/all'
+  save_dir: 'results/exp_dit_huge_ad_enet/all'
 evaluation:
   eval_interval: 50
   eval_step: 4

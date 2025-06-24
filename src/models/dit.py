@@ -223,7 +223,7 @@ class DiT(nn.Module):
         self.num_classes = num_classes
         self.learn_sigma = learn_sigma
         
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size)
         self.x_embedder_linear = nn.Linear(in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
@@ -295,7 +295,7 @@ class DiT(nn.Module):
         x = rearrange(x, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=h, w=w, p1=p, p2=p, c=C)
         return x
 
-    def forward(self, x, t, y, return_tokens=False):
+    def forward(self, x, t, y=None, return_tokens=False, **kwargs):
         """Apply model to an input batch.
         Args:
             x (Tensor): input tensor (B, C, H, W)
@@ -320,9 +320,11 @@ class DiT(nn.Module):
             raise ValueError(f"Invalid input shape: {x.shape}")
     
         t = self.t_embedder(t)  # (B, D)
-        y = self.y_embedder(y, self.training)  # (B, D)
-        
-        cond = t + y
+        if self.num_classes is not None and y is not None:
+            y = self.y_embedder(y, self.training)  # (B, D)
+            cond = t + y
+        else:
+            cond = t
         
         for block in self.blocks:
             x = block(x, cond)  # (B, N, C)

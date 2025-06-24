@@ -42,6 +42,8 @@ def get_backbone_feature_shape(model_type):
         return (272, 16, 16)
     elif model_type == "dinov2-base":
         return (768, 16, 16)
+    elif model_type == "dinov2-large":
+        return (1024, 16, 16)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 
@@ -52,6 +54,11 @@ def get_dinov2(model_name, **kwargs):
     if model_name == "dinov2-base":
         from transformers import Dinov2Model
         model = Dinov2Model.from_pretrained("facebook/dinov2-base", output_hidden_states=True).eval()
+        model = DINOv2Wrapper(model, **kwargs)
+        return model
+    elif model_name == "dinov2-large":
+        from transformers import Dinov2Model
+        model = Dinov2Model.from_pretrained("facebook/dinov2-large", output_hidden_states=True).eval()
         model = DINOv2Wrapper(model, **kwargs)
         return model
     else:
