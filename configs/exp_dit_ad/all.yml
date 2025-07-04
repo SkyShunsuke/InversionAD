@@ -3,8 +3,8 @@ diffusion:
   num_classes: 15
   target_channels: 3
   z_channels: 768
-  depth: 8
-  width: 1024
+  depth: 16
+  width: 2048
   num_sampling_steps: '100'
   ema_decay: 0.999
   learn_sigma: false
@@ -33,7 +33,7 @@ data:
   img_size: 256
   multi_category: false
   num_normal_samples: -1
-  num_workers: 1
+  num_workers: 4
   pin_memory: true
   train: true
   transform_type: default
@@ -51,7 +51,7 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_dit_huge_ad_enet/all'
+  save_dir: 'results/exp_dit_gigant_ad_enet/all'
 evaluation:
   eval_interval: 50
   eval_step: 4

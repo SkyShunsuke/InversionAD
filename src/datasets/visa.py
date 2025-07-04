@@ -151,7 +151,7 @@ class VisA(Dataset):
                     with open(mask_file, 'rb') as f:
                         mask = Image.open(f)
                         mask = mask.convert('L')
-                mask = self.mask_transform(mask)
+                mask = self.mask_transform(mask).bool()
                 inputs["masks"] = mask
             return inputs
 

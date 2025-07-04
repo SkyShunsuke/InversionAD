@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 from torchvision.datasets.folder import default_loader
 from torchvision.transforms.functional import to_tensor
 
@@ -28,6 +30,7 @@ AD2_CLASSES = [
     'wallplugs',
     'walnuts',
 ]
+DEFAULT_SPLIT = 'test_public'
 
 class MVTecAD2(Dataset):
     """Dataset class for MVTec AD 2 objects.
@@ -40,12 +43,17 @@ class MVTecAD2(Dataset):
 
     def __init__(
         self,
-        root: str,
+        data_root: str,
         category,
+        input_res: int,
         split,
         transform=to_tensor,
+        anom_only=False,
+        normal_only=False,
         **kwargs,
     ):
+        if split == "test":
+            split = DEFAULT_SPLIT
         assert split in {
             'train',
             'validation',
@@ -55,18 +63,40 @@ class MVTecAD2(Dataset):
         }, f'unknown split: {split}'
 
         assert (
-            category in MVTEC_AD_2_OBJECTS
+            category in AD2_CLASSES
         ), f'unknown MVTec AD 2 object: {category}'
 
-        self.object = category
+        self.category = category
         self.split = split
         self.transform = transform
 
-        self._image_base_dir = root
+        self._image_base_dir = data_root
+        self.anom_only = anom_only
+        self.normal_only = normal_only
 
         self._object_dir = os.path.join(self._image_base_dir, category)
         # get all images from the split
         self._image_paths = sorted(glob.glob(self._get_pattern()))
+        
+        if "test" in self.split:
+            self.mask_transform = transforms.Compose(
+                [
+                    transforms.Resize(input_res, interpolation=InterpolationMode.NEAREST),
+                    transforms.ToTensor(),
+                ]
+            )
+            
+            self.labels = []
+            for file in self._image_paths:
+                status = str(file).split(os.path.sep)[-2]
+                if status == 'good':
+                    self.labels.append(0)
+                else:
+                    self.labels.append(1)
+            self.normal_indices = [i for i, label in enumerate(self.labels) if label == 0]
+            self.anom_indices = [i for i, label in enumerate(self.labels) if label == 1]
+            
+        self.num_classes = len(AD2_CLASSES)
 
     def _get_pattern(self) -> str:
         if 'private' in self.split:
@@ -81,7 +111,12 @@ class MVTecAD2(Dataset):
         )
 
     def __len__(self):
-        return len(self._image_paths)
+        if self.anom_only:
+            return len(self.anom_indices)
+        elif self.normal_only:
+            return len(self.normal_indices)
+        else:
+            return len(self._image_paths)
 
     def __getitem__(self, idx: int) -> dict:
         """Get dataset item for the index ``idx``.
@@ -94,13 +129,19 @@ class MVTecAD2(Dataset):
             image path, and the relative anomaly image output path for both
             image types continuous and thresholded.
         """
+        
+        if self.anom_only:
+            image_path = self._image_paths[self.anom_indices[idx]]
+        elif self.normal_only:
+            image_path = self._image_paths[self.normal_indices[idx]]
+        else:
+            image_path = self._image_paths[idx]
 
-        image_path = self._image_paths[idx]
         sample = default_loader(image_path)
         if self.transform is not None:
             sample = self.transform(sample)
         cls_name = str(image_path).split("/")[-4]
-        cls_label = MVTEC_AD_2_OBJECTS.index(cls_name)
+        cls_label = AD2_CLASSES.index(cls_name)
 
         return {
             'samples': sample,

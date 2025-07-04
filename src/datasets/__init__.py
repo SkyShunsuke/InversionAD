@@ -85,7 +85,7 @@ def build_dataset(*, dataset_name: str, data_root: str, train: bool, img_size: i
         for cat in VISA_CLASSES:
             kwargs['category'] = cat
             dss.append(VisA(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
-                transform=build_transforms(img_size, transform_type), **kwargs))
+                transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs))
         return ConcatDataset(dss)
     elif dataset_name == 'mvtec_ad2_all':
         dss = []

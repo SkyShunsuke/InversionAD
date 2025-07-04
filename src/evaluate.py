@@ -41,7 +41,6 @@ def parse_args():
     parser.add_argument('--eval_step', type=int, default=-1, help='Number of steps for evaluation')
     parser.add_argument('--noise_step', type=int, default=8, help='Number of noise steps for evaluation')
     parser.add_argument('--use_ema_model', action='store_true', help='Use EMA model for evaluation')
-    parser.add_argument('--distributed', action='store_true', help='Use distributed evaluation')
     args = parser.parse_args()
     return args
 
@@ -106,8 +105,7 @@ def main(args):
                 batch_size=MAX_BATCH_SIZE,
                 shuffle=False,
                 num_workers=NUM_WORKERS,
-                drop_last=False,
-                sampler=DistributedSampler(anom_ds, shuffle=False)
+                drop_last=False
             )
             for anom_ds in anom_dataset.datasets
         ]
@@ -117,8 +115,7 @@ def main(args):
                 batch_size=MAX_BATCH_SIZE,
                 shuffle=False,
                 num_workers=NUM_WORKERS,
-                drop_last=False,
-                sampler=DistributedSampler(normal_ds, shuffle=False)
+                drop_last=False
             )
             for normal_ds in normal_dataset.datasets
         ]
@@ -131,7 +128,6 @@ def main(args):
                 shuffle=False,
                 num_workers=NUM_WORKERS,
                 drop_last=False,
-                sampler=DistributedSampler(anom_dataset, shuffle=False)
             )
         ]
         normal_loader = [
@@ -141,7 +137,6 @@ def main(args):
                 shuffle=False,
                 num_workers=NUM_WORKERS,
                 drop_last=False,
-                sampler=DistributedSampler(normal_dataset, shuffle=False)
             )
         ]
     
@@ -159,7 +154,7 @@ def main(args):
     if args.use_ema_model:
         checkpoint_path = os.path.join(args.save_dir, 'model_ema_latest.pth')
     else:
-        checkpoint_path = os.path.join(args.save_dir, 'model_latest.pth')
+        checkpoint_path = os.path.join(args.save_dir, 'model_best.pth')
     
     model_ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     if is_multi_class:
@@ -201,8 +196,12 @@ def main(args):
     logger.info(f"{auc_dict}")
     # Compute Average AUC
     if is_multi_class:
-        avg_auc = np.mean(list(auc_dict.values()))
-        logger.info(f"Average AUC: {avg_auc}")
+        img_aucs = [auc_dict[cat]["img"] for cat in auc_dict]
+        px_aucs = [auc_dict[cat]["px"] for cat in auc_dict]
+        avg_img_auc = np.mean(img_aucs)
+        avg_px_auc = np.mean(px_aucs)
+        logger.info(f"Average Image AUC: {avg_img_auc}")
+        logger.info(f"Average Pixel AUC: {avg_px_auc}")
     
     
 def init_denoiser(num_inference_steps, device, config, in_sh, inherit_model=None):

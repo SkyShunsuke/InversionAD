@@ -362,7 +362,7 @@ def evaluate_dist(denoiser, feature_extractor, anom_loader, normal_loader, confi
         anomaly_nlls.append(nll)
         anomaly_ats.append(ats)
     dist.barrier()  # Ensure all processes have completed the anomaly data processing
-    
+
     losses = np.array(losses)
     logger.info(f"[{category}] Loss: {losses.mean()} at epoch {epoch}")
     
@@ -385,10 +385,9 @@ def evaluate_dist(denoiser, feature_extractor, anom_loader, normal_loader, confi
     normal_maps = to_numpy(concat_all_gather(normal_maps, world_size))
     anomaly_maps = to_numpy(concat_all_gather(anomaly_maps, world_size))
     normal_gt_masks = to_numpy(concat_all_gather(normal_gt_masks, world_size)).astype(bool)
-    anomaly_gt_masks = to_numpy(concat_all_gather(anomaly_gt_masks, world_size)).astype(bool)
-    if rank != 0:
-        return None
-
+    anomaly_gt_masks = to_numpy(concat_all_gather(anomaly_gt_masks, world_size)).astype(bool) 
+    
+    # Process dropped indices with single process
     ats_min = np.min([normal_ats.min(), anomaly_ats.min()])
     ats_max = np.max([normal_ats.max(), anomaly_ats.max()])
     nlls_min = np.min([normal_nlls.min(), anomaly_nlls.min()])

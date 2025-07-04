@@ -107,8 +107,8 @@ def main(args):
     dataset_config['anom_only'] = False
     dataset_config['normal_only'] = True
     normal_dataset = build_dataset(**dataset_config)
-    anom_loader = DataLoader(anom_dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=False)
-    normal_loader = DataLoader(normal_dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=False)
+    anom_loader = [DataLoader(anom_dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=False)]
+    normal_loader = [DataLoader(normal_dataset, batch_size=1, shuffle=False, num_workers=1, drop_last=False)]
 
     train_loader = DataLoader(train_dataset, batch_size, shuffle=True, \
         pin_memory=config['data']['pin_memory'], num_workers=config['data']['num_workers'], drop_last=True)
