@@ -33,7 +33,7 @@ data:
   img_size: 256
   multi_category: false
   num_normal_samples: -1
-  num_workers: 1
+  num_workers: 4
   pin_memory: true
   train: true
   transform_type: default
@@ -51,7 +51,7 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_dit_hugew_ad_enet/all'
+  save_dir: 'results/exp_dit_huge_ad_enet/all'
 evaluation:
   eval_interval: 50
   eval_step: 4

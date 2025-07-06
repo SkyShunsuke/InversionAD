@@ -1,10 +1,10 @@
 diffusion:
-  model_type: 'unet'
-  num_classes: 30
+  model_type: 'dit'
+  num_classes: 15
   target_channels: 3
   z_channels: 768
-  depth: 2
-  width: 256
+  depth: 16
+  width: 2048
   num_sampling_steps: '100'
   ema_decay: 0.999
   learn_sigma: false
@@ -26,11 +26,10 @@ backbone:
     pretrained: true
     stride: 16
 data:
-  batch_size: 32
+  batch_size: 8
   category: all
-  data_root: /newssd/datasets/realiad_1024
-  meta_dir: /newssd/datasets/realiad_meta/realiad_jsons
-  dataset_name: realiad_all
+  data_root: data/mvtec_loco
+  dataset_name: mvtec_loco_all
   img_size: 256
   multi_category: false
   num_normal_samples: -1
@@ -52,7 +51,7 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_unet_realiad/all'
+  save_dir: 'results/exp_dit_gigant_loco_enet/all'
 evaluation:
   eval_interval: 50
   eval_step: 4
