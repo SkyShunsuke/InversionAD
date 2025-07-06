@@ -2,6 +2,7 @@ data/
 weights/
 results/
 wandb/
+adeval/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
