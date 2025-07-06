@@ -201,6 +201,7 @@ def main(config):
     ) for normal_ds, normal_sampler in zip(normal_dataset.datasets, normal_samplers)]
     
     diff_in_sh = get_backbone_feature_shape(model_type=config['backbone']['model_type'])
+    logger.info(f"Using input shape {diff_in_sh} for the diffusion model")
     model: Denoiser = get_denoiser(**config['diffusion'], input_shape=diff_in_sh)
     ema_decay = config['diffusion']['ema_decay']
     model_ema = copy.deepcopy(model)

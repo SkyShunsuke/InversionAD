@@ -69,7 +69,7 @@ class MVTecAD(Dataset):
             self.mask_transform = transforms.Compose(
                 [
                     transforms.Resize(input_res, interpolation=InterpolationMode.NEAREST),
-                    transforms.ToTensor(),
+                    transforms.Lambda(lambda img: torch.from_numpy(np.array(img, dtype=np.uint8)).long())
                 ]
             )
 

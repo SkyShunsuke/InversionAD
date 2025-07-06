@@ -18,7 +18,7 @@ from pprint import pprint
 from datasets import build_dataset
 from utils import get_optimizer, get_lr_scheduler
 from denoiser import get_denoiser, Denoiser
-from backbones import get_backbone
+from backbones import get_backbone, get_backbone_feature_shape
 from evaluate import evaluate_inv
 
 from einops import rearrange
@@ -113,7 +113,7 @@ def main(args):
     train_loader = DataLoader(train_dataset, batch_size, shuffle=True, \
         pin_memory=config['data']['pin_memory'], num_workers=config['data']['num_workers'], drop_last=True)
 
-    diff_in_sh = (272, 16, 16)  # For EfficientNet-b4
+    diff_in_sh = get_backbone_feature_shape(model_type=config['backbone']['model_type'])
     model: Denoiser = get_denoiser(**config['diffusion'], input_shape=diff_in_sh)
     ema_decay = config['diffusion']['ema_decay']
     model_ema = copy.deepcopy(model)
@@ -141,6 +141,10 @@ def main(args):
     with open(save_path, 'w') as f:
         yaml.dump(config, f)
     print(f"Config is saved at {save_path}")
+    
+    # Number of parameters
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f"Number of parameters: {num_params / 1e6:.2f}M")
     
     model.train()
     print(f"Steps per epoch: {len(train_loader)}")
@@ -196,7 +200,7 @@ def main(args):
                 epoch + 1,
                 config["evaluation"]["eval_step"],
                 device,
-            )
+            )["I-AUROC"]
             
             if current_auc > best_auc:
                 best_auc = current_auc

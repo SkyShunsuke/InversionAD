@@ -1,9 +1,9 @@
 diffusion:
   model_type: 'dit'
-  num_classes: 15
+  num_classes: 30
   target_channels: 3
   z_channels: 768
-  depth: 8
+  depth: 16
   width: 2048
   num_sampling_steps: '100'
   ema_decay: 0.999
@@ -13,7 +13,7 @@ diffusion:
   channel_mult: [1,1,2,2]
 backbone: 
     model_type: efficientnet-b4
-    outblocks:
+    outblocks: 
       - 1
       - 5
       - 9
@@ -26,12 +26,13 @@ backbone:
     pretrained: true
     stride: 16
 data:
-  batch_size: 8
+  batch_size: 16
   category: all
-  data_root: data/mvtec_ad
-  dataset_name: mvtec_ad_all
+  data_root: /newssd/datasets/realiad_1024
+  meta_dir: /newssd/datasets/realiad_meta/realiad_jsons
+  dataset_name: realiad_all
   img_size: 256
-  multi_category: false
+  multi_category: true
   num_normal_samples: -1
   num_workers: 1
   pin_memory: true
@@ -42,7 +43,7 @@ optimizer:
   init_lr: 0.000001
   peak_lr: 0.00005
   final_lr: 0.000005
-  num_epochs: 1000
+  num_epochs: 300
   optimizer_name: adamw
   scheduler_type: warmup_cosine
   warmup_epochs: 40
@@ -51,7 +52,7 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_dit_hugew_ad_enet/all'
+  save_dir: 'results/exp_dit_gigant_realiad_enet/all'
 evaluation:
   eval_interval: 50
   eval_step: 4

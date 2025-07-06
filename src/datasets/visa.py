@@ -74,7 +74,7 @@ class VisA(Dataset):
             self.mask_transform = transforms.Compose(
                 [
                     transforms.Resize((self.input_res, self.input_res), interpolation=InterpolationMode.NEAREST),
-                    transforms.ToTensor(),
+                    transforms.Lambda(lambda img: torch.from_numpy(np.array(img, dtype=np.uint8)).long())
                 ]
             )
             

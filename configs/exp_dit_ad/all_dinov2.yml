@@ -4,7 +4,7 @@ diffusion:
   target_channels: 3
   z_channels: 768
   depth: 8
-  width: 2048
+  width: 1024
   num_sampling_steps: '100'
   ema_decay: 0.999
   learn_sigma: false
@@ -12,17 +12,9 @@ diffusion:
   patch_size: 1
   channel_mult: [1,1,2,2]
 backbone: 
-    model_type: efficientnet-b4
-    outblocks:
-      - 1
-      - 5
-      - 9
-      - 21
-    outstrides: 
-      - 2
-      - 4
-      - 8
-      - 16
+    model_type: dinov2-base
+    outblocks: 
+      - 11
     pretrained: true
     stride: 16
 data:
@@ -30,7 +22,7 @@ data:
   category: all
   data_root: data/mvtec_ad
   dataset_name: mvtec_ad_all
-  img_size: 256
+  img_size: 224
   multi_category: false
   num_normal_samples: -1
   num_workers: 1
@@ -51,7 +43,7 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_dit_hugew_ad_enet/all'
+  save_dir: 'results/exp_dit_gigant_ad_dinob/all'
 evaluation:
   eval_interval: 50
   eval_step: 4

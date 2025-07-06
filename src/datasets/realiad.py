@@ -74,7 +74,7 @@ class RealIAD(Dataset):
             self.mask_transform = transforms.Compose(
                 [
                     transforms.Resize(input_res, interpolation=InterpolationMode.NEAREST),
-                    transforms.ToTensor(),
+                    transforms.Lambda(lambda img: torch.from_numpy(np.array(img, dtype=np.uint8)).long())
                 ]
             )
             self.normal_indices = [i for i, label in enumerate(self.labels) if label == 0]
@@ -198,22 +198,71 @@ if __name__ == "__main__":
     
     loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=4)
     
-    print(dataset.masks)
+    # print(dataset.masks)
     
-    for i in range(len(dataset)):
-        if dataset.labels[i] == 0:
-            continue
-        else:
-            assert dataset.masks[i] is not None, f"Mask for index {i} is None"
-            print(f"Index {i}: {dataset.img_files[i]}, Label: {dataset.labels[i]}, Mask: {dataset.masks[i]}")
+    # for i in range(len(dataset)):
+    #     if dataset.labels[i] == 0:
+    #         continue
+    #     else:
+    #         assert dataset.masks[i] is not None, f"Mask for index {i} is None"
+    #         print(f"Index {i}: {dataset.img_files[i]}, Label: {dataset.labels[i]}, Mask: {dataset.masks[i]}")
     
-    for batch in loader:
-        print(batch["clsnames"], batch["clslabels"], batch["filenames"])
-        if "masks" in batch:
-            print("Masks available")
-        else:
-            print("No masks available")
-        break  # Just to test one batch
+    # for batch in loader:
+    #     print(batch["clsnames"], batch["clslabels"], batch["filenames"])
+    #     if "masks" in batch:
+    #         print("Masks available")
+    #     else:
+    #         print("No masks available")
+    #     break  # Just to test one batch
     print(f"Dataset length: {len(dataset)}")
-    print(f"Sample item: {dataset[0]}")
     
+    # Calculate number of the all normal images accross all categories
+    normal_count = 0
+    for cls in REALIAD_CLASSES:
+        cls_dataset = RealIAD(
+            data_root=data_dir,
+            category=cls,
+            input_res=input_res,
+            split="train",
+            meta_dir=meta_dir,
+            transform=transform,
+            is_mask=True,
+            cls_label=True,
+            anom_only=False,
+            normal_only=False
+        )
+        normal_count += len(cls_dataset)
+        
+    for cls in REALIAD_CLASSES:
+        cls_dataset = RealIAD(
+            data_root=data_dir,
+            category=cls,
+            input_res=input_res,
+            split="test",
+            meta_dir=meta_dir,
+            transform=transform,
+            is_mask=True,
+            cls_label=True,
+            anom_only=False,
+            normal_only=True
+        )
+        normal_count += len(cls_dataset)
+    print(f"Total number of normal images across all categories: {normal_count}")
+    
+    # Calculate number of the all anomalous images accross all categories
+    anom_count = 0
+    for cls in REALIAD_CLASSES:
+        cls_dataset = RealIAD(
+            data_root=data_dir,
+            category=cls,
+            input_res=input_res,
+            split="test",
+            meta_dir=meta_dir,
+            transform=transform,
+            is_mask=True,
+            cls_label=True,
+            anom_only=True,
+            normal_only=False
+        )
+        anom_count += len(cls_dataset)
+    print(f"Total number of anomalous images across all categories: {anom_count}")

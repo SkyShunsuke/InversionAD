@@ -52,7 +52,6 @@ class Denoiser(nn.Module):
         self.num_repeat = num_repeat
         
         self.cls_embed = nn.Embedding(num_classes, width)
-        
         self.net = create_denising_model(
             model_type=model_type,
             in_channels=self.in_channels,

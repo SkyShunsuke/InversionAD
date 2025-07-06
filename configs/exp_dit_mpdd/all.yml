@@ -28,8 +28,8 @@ backbone:
 data:
   batch_size: 8
   category: all
-  data_root: data/mvtec_ad
-  dataset_name: mvtec_ad_all
+  data_root: data/mpdd
+  dataset_name: mpdd_all
   img_size: 256
   multi_category: false
   num_normal_samples: -1
@@ -51,7 +51,7 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_dit_hugew_ad_enet/all'
+  save_dir: 'results/exp_dit_hugew_mpdd_enet/all'
 evaluation:
   eval_interval: 50
   eval_step: 4

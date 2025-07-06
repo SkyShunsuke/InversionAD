@@ -40,6 +40,8 @@ class DINOv2Wrapper(nn.Module):
 def get_backbone_feature_shape(model_type):
     if model_type == "efficientnet-b4":
         return (272, 16, 16)
+    elif model_type == "dinov2-small":
+        return (384, 16, 16)
     elif model_type == "dinov2-base":
         return (768, 16, 16)
     elif model_type == "dinov2-large":
@@ -51,7 +53,12 @@ def get_efficientnet(model_name, **kwargs):
     return build_efficient(model_name, **kwargs)
 
 def get_dinov2(model_name, **kwargs):
-    if model_name == "dinov2-base":
+    if model_name == "dinov2-small":
+        from transformers import Dinov2Model
+        model = Dinov2Model.from_pretrained("facebook/dinov2-small", output_hidden_states=True).eval()
+        model = DINOv2Wrapper(model, **kwargs)
+        return model
+    elif model_name == "dinov2-base":
         from transformers import Dinov2Model
         model = Dinov2Model.from_pretrained("facebook/dinov2-base", output_hidden_states=True).eval()
         model = DINOv2Wrapper(model, **kwargs)
@@ -265,18 +272,15 @@ class BackboneWrapper(nn.Module):
         return concat_y, y
     
 if __name__ == "__main__":
-    # model_kwargs = {
-    #     'model_type': 'efficientnet-b4',
-    #     'outblocks': (1, 5, 9, 21),
-    #     'outstrides': (2, 4, 8, 16),
-    #     'pretrained': True,
-    #     'stride': 16
-    # }
     model_kwargs = {
-        "model_type": "resnet50",
+        'model_type': 'efficientnet-b4',
+        'outblocks': (1, 5, 9, 21),
+        'outstrides': (2, 4, 8, 16),
+        'pretrained': True,
+        'stride': 16
     }
     model = get_backbone(**model_kwargs).to('cuda')
-    x = torch.randn(1, 3, 256, 256).to('cuda')
+    x = torch.randn(1, 3, 384, 384).to('cuda')
     with torch.no_grad():
         features, y = model(x)
     print(features[0].shape)
@@ -284,4 +288,3 @@ if __name__ == "__main__":
     print(len(y))
     for i in range(len(y)):
         print(y[i].shape)
-    

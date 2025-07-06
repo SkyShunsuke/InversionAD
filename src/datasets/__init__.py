@@ -9,6 +9,7 @@ from .mvtec_ad2 import MVTecAD2, AD2_CLASSES
 from .mvtec_loco import MVTecLOCO, LOCO_CLASSES
 from .visa import VisA, VISA_CLASSES
 from .realiad import RealIAD, REALIAD_CLASSES
+from .mpdd import MPDD, MPDD_CLASSES
 
 import random
 
@@ -64,6 +65,9 @@ def build_dataset(*, dataset_name: str, data_root: str, train: bool, img_size: i
     elif dataset_name == 'visa':
         return VisA(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
             transform=build_transforms(img_size, transform_type), is_mask=True, **kwargs)
+    elif dataset_name == 'mpdd':
+        return MPDD(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
+            transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs)
     elif dataset_name == 'realiad':
         meta_dir = kwargs.get('meta_dir', None)
         if meta_dir is None:
@@ -85,7 +89,14 @@ def build_dataset(*, dataset_name: str, data_root: str, train: bool, img_size: i
         for cat in VISA_CLASSES:
             kwargs['category'] = cat
             dss.append(VisA(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
-                transform=build_transforms(img_size, transform_type), **kwargs))
+                transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs))
+        return ConcatDataset(dss)
+    elif dataset_name == 'mpdd_all':
+        dss = []
+        for cat in MPDD_CLASSES:
+            kwargs['category'] = cat
+            dss.append(MPDD(data_root=data_root, input_res=img_size, split='train' if train else 'test', \
+                transform=build_transforms(img_size, transform_type), is_mask=True, cls_label=True, **kwargs))
         return ConcatDataset(dss)
     elif dataset_name == 'mvtec_ad2_all':
         dss = []
