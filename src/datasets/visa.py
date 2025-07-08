@@ -71,10 +71,12 @@ class VisA(Dataset):
         self.img_files = self.get_files()
         self.labels = [0] * len(self.img_files)
         if self.split == 'test':
+            def mask_to_tensor(img):
+                return torch.from_numpy(np.array(img, dtype=np.uint8)).long()
             self.mask_transform = transforms.Compose(
                 [
-                    transforms.Resize((self.input_res, self.input_res), interpolation=InterpolationMode.NEAREST),
-                    transforms.Lambda(lambda img: torch.from_numpy(np.array(img, dtype=np.uint8)).long())
+                    transforms.Resize(input_res, interpolation=InterpolationMode.NEAREST),
+                    transforms.Lambda(mask_to_tensor)
                 ]
             )
             

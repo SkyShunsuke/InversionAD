@@ -18,16 +18,16 @@ import copy
 import argparse
 import yaml
 
-from datasets import build_dataset
-from utils import get_optimizer, get_lr_scheduler
-from denoiser import get_denoiser, Denoiser
-from backbones import get_backbone
+from src.datasets import build_dataset
+from src.utils import get_optimizer, get_lr_scheduler
+from src.denoiser import get_denoiser, Denoiser
+from src.backbones import get_backbone
 
 from einops import rearrange
 from skimage import measure
 from sklearn.metrics import roc_auc_score, average_precision_score, auc
-from utils import AverageMeter
-from adeval.adeval import EvalAccumulatorCuda
+from src.utils import AverageMeter
+from src.adeval.adeval import EvalAccumulatorCuda
 
 from torch.utils.data import ConcatDataset
 from torch.utils.data.distributed import DistributedSampler
@@ -50,7 +50,11 @@ def parse_args():
     parser.add_argument('--eval_step', type=int, default=-1, help='Number of steps for evaluation')
     parser.add_argument('--noise_step', type=int, default=8, help='Number of noise steps for evaluation')
     parser.add_argument('--use_ema_model', action='store_true', help='Use EMA model for evaluation')
+    parser.add_argument('--use_best_model', action='store_true', help='Use best model for evaluation')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    
     args = parser.parse_args()
+    assert sum([args.use_best_model, args.use_ema_model]) < 2, "Please specify either --use_best_model or --use_ema_model"
     return args
 
 def postprocess(x):
@@ -143,27 +147,19 @@ def compute_pro(masks: ndarray, amaps: ndarray, num_th: int = 200) -> float:
 
     return pro_auc
 
-def main(args):
+def main(config, args):
+    
+    # For reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     
     assert args.save_dir is not None, "Please provide a save directory"
-    config_path = os.path.join(args.save_dir, 'config.yaml')
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found at {config_path}")
-    
-    def load_config(config_path):
-        with open(config_path, 'r') as stream:
-            try:
-                config = yaml.safe_load(stream)
-            except yaml.YAMLError as exc:
-                logger.info(exc)
-        return config
-    
-    config = load_config(config_path)
 
     dataset_config = config['data']
     device = config['meta']['device']
     
     dataset_config['train'] = False
+    dataset_config['normal_only'] = False
     dataset_config['anom_only'] = True
     anom_dataset = build_dataset(**dataset_config)
     dataset_config['anom_only'] = False
@@ -215,6 +211,7 @@ def main(args):
         ]
     
     diff_in_sh = (272, 16, 16)  # For EfficientNet-b4
+    # diff_in_sh = (272, 24, 24)  # For EfficientNet-b4 with 24x24 input
     model: Denoiser = get_denoiser(**config['diffusion'], input_shape=diff_in_sh)
     model.to(device).eval()
 
@@ -227,10 +224,14 @@ def main(args):
     # Load the model
     if args.use_ema_model:
         checkpoint_path = os.path.join(args.save_dir, 'model_ema_latest.pth')
-    else:
+    elif args.use_best_model:
         checkpoint_path = os.path.join(args.save_dir, 'model_best.pth')
-        # checkpoint_path = os.path.join(args.save_dir, 'model_latest.pth')
-    
+        if not os.path.exists(checkpoint_path):
+            logger.warning(f"Best model checkpoint not found at {checkpoint_path}. Using latest model instead.")
+            checkpoint_path = os.path.join(args.save_dir, 'model_latest.pth')
+    else:
+        checkpoint_path = os.path.join(args.save_dir, 'model_latest.pth')
+        
     model_ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     if is_multi_class:
         # for distributed training, the model state dict keys may have a prefix
@@ -282,6 +283,8 @@ def main(args):
         pros = [metrics_dict[cat]["PRO"] for cat in metrics_dict]
         img_f1s = [metrics_dict[cat]["I-F1Max"] for cat in metrics_dict]
         px_f1s = [metrics_dict[cat]["P-F1Max"] for cat in metrics_dict]
+        latencies = [metrics_dict[cat]["latency"] for cat in metrics_dict]    
+        memory_usage = [metrics_dict[cat]["memory"] for cat in metrics_dict]
         
         avg_img_auc = np.mean(img_aucs)
         avg_px_auc = np.mean(px_aucs)
@@ -290,14 +293,22 @@ def main(args):
         avg_pro = np.mean(pros)
         avg_img_f1 = np.mean(img_f1s)
         avg_px_f1 = np.mean(px_f1s)
+        avg_latency = np.mean(latencies)
+        avg_memory_usage = np.mean(memory_usage)
         
+        logger.info(f"\nImage-level Metrics:\n ================\n")
         logger.info(f"Average Image AUC: {avg_img_auc}")
-        logger.info(f"Average Pixel AUC: {avg_px_auc}")
         logger.info(f"Average Image AP: {avg_img_ap}")
+        logger.info(f"Average Image F1Max: {avg_img_f1}")
+        logger.info(f"\nPixel-level Metrics:\n================\n")
+        logger.info(f"Average Pixel AUC: {avg_px_auc}")
         logger.info(f"Average Pixel AP: {avg_px_ap}")
         logger.info(f"Average PRO: {avg_pro}")
-        logger.info(f"Average Image F1Max: {avg_img_f1}")
         logger.info(f"Average Pixel F1Max: {avg_px_f1}")
+        logger.info(f"\nEfficiency Metrics:\n ================\n")
+        logger.info(f"Average Latency: {avg_latency} ms")
+        logger.info(f"Average Memory Usage: {avg_memory_usage} MB")
+        
     
 def init_denoiser(num_inference_steps, device, config, in_sh, inherit_model=None):
     config["diffusion"]["num_sampling_steps"] = str(num_inference_steps)
@@ -428,7 +439,7 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         category = anom_loader.dataset.category if hasattr(anom_loader.dataset, 'category') else 'unknown'
         if category not in metrics_dict:
             metrics_dict[category] = {}
-        logger.info(f"[{category}] Evaluating on {len(anom_loader)} anomalous samples and {len(normal_loader)} normal samples")
+        logger.info(f"[{category}] Evaluating on {len(anom_loader.dataset)} anomalous samples and {len(normal_loader.dataset)} normal samples")
         logger.info(f"[{category}] Evaluation step: {eval_step}")
         logger.info(f"[{category}] Epoch: {epoch}")
     
@@ -439,7 +450,10 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         normal_gt_masks = []
         losses = []
         time_meter = AverageMeter()
-        for i, batch in tqdm(enumerate(normal_loader), total=len(normal_loader)):
+        memory_meter = AverageMeter()
+        c = 0
+        for batch in tqdm(normal_loader, total=len(normal_loader)):
+            
             images = batch["samples"].to(device)
             org_h, org_w = images.shape[2], images.shape[3]
             labels = batch["clslabels"].to(device)
@@ -460,21 +474,26 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
             ats = torch.abs(min_ats_spatial - max_ats_spatial)  # (bs, )
             nll = calculate_log_pdf(latents_last.cpu()) * -1
             e_time = time.perf_counter()
-            
-            time_meter.update(e_time - s_time, n=latents_last.shape[0])
+            time_meter.update(e_time - s_time, n=1)
 
             normal_map = F.interpolate(latents_last_l2.unsqueeze(0), size=(org_h, org_w), mode='bilinear', align_corners=False).squeeze(0)
             normal_maps.append(normal_map.cpu().numpy())
             normal_nlls.extend(nll.cpu().numpy())
             normal_ats.extend(ats.cpu().numpy())
-        
-        logger.info(f"[{category}] Average time per sample: {time_meter.avg*1000:.4f} [ms]")
+            
+            memory_meter.update(
+                torch.cuda.max_memory_allocated() / (1024 * 1024), n=latents_last.shape[0]
+            )
+            
+        # logger.info(f"[{category}] Average time per sample: {time_meter.avg*1000:.4f} [ms]")
         anomaly_ats = []
         anomaly_nlls = []
         anomaly_maps = []
         anomaly_gt_masks = []
-        time_meter = AverageMeter()
-        for i, batch in tqdm(enumerate(anom_loader), total=len(anom_loader)):
+        # time_meter = AverageMeter()
+        
+        c = 0
+        for batch in tqdm(anom_loader, total=len(anom_loader)):
             images = batch["samples"].to(device)
             labels = batch["clslabels"].to(device)
             anomaly_gt_masks.append(batch["masks"])
@@ -498,16 +517,23 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
             nll = calculate_log_pdf(latents_last.cpu()) * -1
             e_time = time.perf_counter()
             
-            time_meter.update(e_time - s_time, n=latents_last.shape[0])
+            time_meter.update(e_time - s_time, n=1)
     
             anomaly_map = F.interpolate(latents_last_l2.unsqueeze(0), size=(org_h, org_w), mode='bilinear', align_corners=False).squeeze(0)
             anomaly_maps.append(anomaly_map.cpu().numpy())
             anomaly_nlls.extend(nll.cpu().numpy())
             anomaly_ats.extend(ats.cpu().numpy())
+            
+            memory_meter.update(
+                torch.cuda.max_memory_allocated() / (1024 * 1024), n=latents_last.shape[0]
+            )
         
         losses = np.array(losses)
         logger.info(f"[{category}] Loss: {losses.mean()} at epoch {epoch}")
         logger.info(f"[{category}] Average time per sample: {time_meter.avg*1000:.4f} [ms]")
+        logger.info(f"[{category}] Average memory usage: {memory_meter.avg:.2f} [MB]")
+        metrics_dict[category]["latency"] = time_meter.avg * 1000  # Convert to milliseconds
+        metrics_dict[category]["memory"] = memory_meter.avg  # in MB
         
         normal_ats = np.array(normal_ats)
         anomaly_ats = np.array(anomaly_ats)
@@ -537,7 +563,7 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         roc_auc = roc_auc_score(y_true, y_score)
         ap = average_precision_score(y_true, y_score)
         f1max = metrics.F1Max()
-        f1max_score = f1max(torch.from_numpy(y_score), torch.from_numpy(y_true))
+        f1max_score = f1max(torch.from_numpy(y_score).to(device), torch.from_numpy(y_true).to(device))
         e_time = time.perf_counter()
         logger.info(f"[{category}] Image-level metrics computation time: {e_time - s_time:.4f} seconds")
         
@@ -612,7 +638,7 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         logger.info(f"[{category}] Pixel F1Max computation time: {e_time - s_time:.4f} seconds")
         
         s_time = time.perf_counter()
-        f1max_px_score = f1max_px(torch.from_numpy(y_score_px), torch.from_numpy(y_true_px))
+        f1max_px_score = f1max_px(torch.from_numpy(y_score_px).to(device), torch.from_numpy(y_true_px).to(device))
         e_time = time.perf_counter()
         logger.info(f"[{category}] Pixel F1Max score computation time: {e_time - s_time:.4f} seconds")
         
@@ -629,6 +655,7 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         logger.info(f"[{category}] Image F1Max: {f1max_score.item()} at epoch {epoch}")
         logger.info(f"[{category}] Pixel F1Max: {f1max_px_score.item()} at epoch {epoch}")
         
+        torch.cuda.empty_cache()
     logger.info(f"Evaluation completed for all categories.")
     return metrics_dict
 
@@ -647,7 +674,7 @@ def evaluate_dist(denoiser, feature_extractor, anom_loader, normal_loader, confi
     
     eval_denoiser = init_denoiser(eval_step, device, config, in_sh, inherit_model=denoiser)
     
-    logger.info(f"[{category}] Evaluating on {len(anom_loader)} anomalous samples and {len(normal_loader)} normal samples")
+    logger.info(f"[{category}] Evaluating on {len(anom_loader.dataset)} anomalous samples and {len(normal_loader.dataset)} normal samples")
     logger.info(f"[{category}] Evaluation step: {eval_step}")
     logger.info(f"[{category}] Epoch: {epoch}")
     

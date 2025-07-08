@@ -5,10 +5,13 @@ export CUDA_VISIBLE_DEVICES=0
 #     --save_dir results/exp_dit_hugew_visa_enet/all \
 #     --eval_step 2 \
 
-python ./src/evaluate.py \
+python main.py \
+    --task test \
+    --devices cuda:0 \
     --eval_strategy inversion \
     --save_dir results/exp_dit_gigant_realiad_enet/all \
-    --eval_step 3 \
+    --use_best_model \
+    --eval_step 4 \
 
 # python ./src/evaluate.py \
 #     --eval_strategy inversion \

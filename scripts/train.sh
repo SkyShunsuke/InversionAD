@@ -1,3 +1,5 @@
-export CUDA_VISIBLE_DEVICES=0
-python ./src/train.py \
-    --config_path ./configs/exp_dit_ad/all_enet384.yml \
+python ./main.py \
+    --task train \
+    --fname ./configs/exp_unet_ad/tile.yml \
+    --devices cuda:1 \
+    --port 12346 \

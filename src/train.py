@@ -15,11 +15,11 @@ import argparse
 import yaml
 from pprint import pprint
 
-from datasets import build_dataset
-from utils import get_optimizer, get_lr_scheduler
-from denoiser import get_denoiser, Denoiser
-from backbones import get_backbone, get_backbone_feature_shape
-from evaluate import evaluate_inv
+from src.datasets import build_dataset
+from src.utils import get_optimizer, get_lr_scheduler
+from src.denoiser import get_denoiser, Denoiser
+from src.backbones import get_backbone, get_backbone_feature_shape
+from src.evaluate import evaluate_inv
 
 from einops import rearrange
 from sklearn.metrics import roc_curve, roc_auc_score
@@ -68,17 +68,7 @@ def extract_features(x, model):
     out = rearrange(out, 'b (h w) d -> b d h w', h=14, w=14)
     return out
     
-def main(args):
-    
-    def load_config(config_path):
-        with open(config_path, 'r') as stream:
-            try:
-                config = yaml.safe_load(stream)
-            except yaml.YAMLError as exc:
-                print(exc)
-        return config
-    
-    config = load_config(args.config_path)
+def main(config):
     pprint(config)
     
     if use_wandb:

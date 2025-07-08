@@ -12,9 +12,9 @@ import os
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from diffusion import create_diffusion, SpacedDiffusion
-from models import create_denising_model
-from models.vision_transformer import PosEmbedding
+from src.diffusion import create_diffusion, SpacedDiffusion
+from src.models import create_denising_model
+from src.models.vision_transformer import PosEmbedding
 
 class Denoiser(nn.Module):
     def __init__(

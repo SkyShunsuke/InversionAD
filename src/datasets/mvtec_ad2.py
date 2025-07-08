@@ -81,10 +81,12 @@ class MVTecAD2(Dataset):
         self._image_paths = sorted(glob.glob(self._get_pattern()))
         
         if "test" in self.split:
+            def mask_to_tensor(img):
+                return torch.from_numpy(np.array(img, dtype=np.uint8)).long()
             self.mask_transform = transforms.Compose(
                 [
                     transforms.Resize(input_res, interpolation=InterpolationMode.NEAREST),
-                    transforms.Lambda(lambda img: torch.from_numpy(np.array(img, dtype=np.uint8)).long())
+                    transforms.Lambda(mask_to_tensor)
                 ]
             )
             

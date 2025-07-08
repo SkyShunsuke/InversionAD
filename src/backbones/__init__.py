@@ -7,8 +7,11 @@ import torch.nn.functional as F
 from torchvision import models
 from torchvision.models import VGG19_Weights, EfficientNet_V2_S_Weights, EfficientNet_V2_M_Weights, EfficientNet_V2_L_Weights, ResNet50_Weights
 
-from .efficientnet import build_efficient
-from .resnet import wide_resnet101_2, wide_resnet50_2, resnet50
+# from .efficientnet import build_efficient
+# from .resnet import wide_resnet101_2, wide_resnet50_2, resnet50
+
+from efficientnet import build_efficient
+from resnet import wide_resnet101_2, wide_resnet50_2, resnet50
 
 from einops import rearrange
 
@@ -39,7 +42,8 @@ class DINOv2Wrapper(nn.Module):
         
 def get_backbone_feature_shape(model_type):
     if model_type == "efficientnet-b4":
-        return (272, 16, 16)
+        # return (272, 16, 16)
+        return (272, 32, 32)
     elif model_type == "dinov2-small":
         return (384, 16, 16)
     elif model_type == "dinov2-base":
@@ -133,7 +137,8 @@ def get_backbone(**kwargs):
     elif 'efficientnet' in model_name:
         # net = get_efficientnet(model_name, pretrained=True, outblocks=[1, 5, 9, 21], outstrides=[2, 4, 8, 16])
         net =  get_efficientnet(model_name, **kwargs)
-        return BackboneWrapper(net, [0.125, 0.25, 0.5, 1.0])
+        # return BackboneWrapper(net, scale_factors=[0.125, 0.25, 0.5, 1.0])
+        return BackboneWrapper(net, target_size=(32, 32))
     elif 'dinov2' in model_name:
         net = get_dinov2(model_name, **kwargs)
         return net
@@ -252,14 +257,20 @@ class BackboneModel(nn.Module):
         BackboneModel.intermediate_cache = []
 
 class BackboneWrapper(nn.Module):
-    def __init__(self, backbone, scale_factors):
+    def __init__(self, backbone, scale_factors=None, target_size=None):
         super(BackboneWrapper, self).__init__()
         self.backbone = backbone
         self.scale_factors = scale_factors
+        self.target_size = target_size
+        assert scale_factors is not None or target_size is not None, "Either scale_factors or target_size must be provided"
         
         self.downsamples = nn.ModuleList()
-        for scale_factor in scale_factors:
-            self.downsamples.append(nn.Upsample(scale_factor=scale_factor, mode='bilinear'))
+        if scale_factors is not None:
+            for scale_factor in scale_factors:
+                self.downsamples.append(nn.Upsample(scale_factor=scale_factor, mode='bilinear'))
+        elif target_size is not None:
+            for _ in range(len(self.backbone.outblocks)):
+                self.downsamples.append(nn.Upsample(size=target_size, mode='bilinear'))
         
     def forward(self, x):
     
@@ -280,7 +291,7 @@ if __name__ == "__main__":
         'stride': 16
     }
     model = get_backbone(**model_kwargs).to('cuda')
-    x = torch.randn(1, 3, 384, 384).to('cuda')
+    x = torch.randn(1, 3, 224, 224).to('cuda')
     with torch.no_grad():
         features, y = model(x)
     print(features[0].shape)

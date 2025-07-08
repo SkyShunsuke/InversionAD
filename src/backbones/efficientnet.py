@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .utils import (
+from utils import (
     MemoryEfficientSwish,
     Swish,
     calculate_output_image_size,

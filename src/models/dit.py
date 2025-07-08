@@ -10,7 +10,7 @@ import math
 from einops import rearrange
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 
-from models.vision_transformer import PosEmbedding, get_unmasked_indices
+from src.models.vision_transformer import PosEmbedding, get_unmasked_indices
 
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #

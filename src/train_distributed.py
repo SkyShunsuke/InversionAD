@@ -1,11 +1,11 @@
 
 import os
 import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-import torch
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 
+import torch
+import torch.distributed as dist
 import numpy as np
 from tqdm import tqdm
 from pathlib import Path
@@ -15,11 +15,11 @@ import argparse
 import yaml
 import time
 
-from datasets import build_dataset
-from utils import get_optimizer, get_lr_scheduler
-from denoiser import get_denoiser, Denoiser
-from backbones import get_backbone, get_backbone_feature_shape
-from evaluate import evaluate_dist
+from src.datasets import build_dataset
+from src.utils import get_optimizer, get_lr_scheduler, init_distributed
+from src.denoiser import get_denoiser, Denoiser
+from src.backbones import get_backbone, get_backbone_feature_shape
+import src.evaluate as evaluate
 
 from einops import rearrange
 from sklearn.metrics import roc_curve, roc_auc_score
@@ -29,35 +29,6 @@ from dotenv import load_dotenv
 import multiprocessing as mp
 import logging
 import torch.distributed as dist
-
-def init_distributed(port=12345, rank_and_world_size=(None, None)):
-    if dist.is_available() and dist.is_initialized():
-        return dist.get_world_size(), dist.get_rank()
-    
-    rank, world_size = rank_and_world_size
-    os.environ['MASTER_ADDR'] = 'localhost'
-    
-    if (rank is None) or (world_size is None):
-        try:
-            world_size = int(os.environ['SLURM_NTASKS'])
-            rank = int(os.environ['SLURM_PROCID'])
-            os.environ['MASTER_ADDR'] = os.environ['HOSTNAME']
-        except Exception:
-            logger.info('SLURM vars not set (distributed training not available)')
-            world_size, rank = 1, 0
-            return world_size, rank
-    
-    try:
-        os.environ['MASTER_PORT'] = str(port)
-        torch.distributed.init_process_group(
-            backend='nccl',
-            world_size=world_size,
-            rank=rank)
-    except Exception as e:
-        world_size, rank = 1, 0
-        logger.info(f'distributed training not available {e}')
-    
-    return world_size, rank
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger()
@@ -306,7 +277,7 @@ def main(config):
             aucs_dict = {}
             for anom_loader, normal_loader in zip(anom_loaders, normal_loaders):
                 logger.info(f"Evaluating on {anom_loader.dataset.category} dataset")
-                auc = evaluate_dist(
+                auc = evaluate.evaluate_dist(
                     model,
                     feature_extractor,
                     anom_loader,
@@ -347,49 +318,6 @@ def main(config):
     save_path = save_dir / "model_ema_latest.pth"
     torch.save(model_ema.state_dict(), save_path)
     logger.info(f"Model is saved at {save_dir}")
-    
-def process_main(rank, fname, world_size, devices, port):
-    import os
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(devices[rank].split(":")[-1])
-    
-    import logging
-    logging.basicConfig()
-    logger = logging.getLogger()
-    
-    if rank == 0:
-        logger.setLevel(logging.INFO)
-    else:
-        logger.setLevel(logging.ERROR)
-        
-    logging.info(f"called-params {fname}")  
-    
-    # load params
-    parms = load_config(fname)
-    logging.info("loaded params...")
-    
-    world_size, rank = init_distributed(rank_and_world_size=(rank, world_size), port=port)
-    logger.info(f"Running... (rank: {rank}/{world_size})")
-    main(parms)
-    dist.destroy_process_group()
-
-if __name__ == "__main__":
-    args = parse_args()
-    
-    num_gpus = len(args.devices)
-    mp.set_start_method("spawn", True)
-    
-    processes = []
-    for rank in range(num_gpus):
-        p = mp.Process(
-            target=process_main,
-            args=(rank, args.config_path, num_gpus, args.devices, args.port)
-        )
-        p.start()
-        processes.append(p)
-        
-    for p in processes:
-        p.join()
-    logger.info("All processes finished.")
 
 
     

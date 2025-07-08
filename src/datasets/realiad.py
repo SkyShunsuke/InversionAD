@@ -61,6 +61,7 @@ class RealIAD(Dataset):
         
         assert Path(self.data_root).exists(), f"Path {self.data_root} does not exist"
         assert self.split == 'train' or self.split == 'test'
+        assert sum([self.anom_only, self.normal_only]) <= 1, "Only one of anom_only or normal_only can be True. Currently: anom_only={}, normal_only={}".format(self.anom_only, self.normal_only)
         
         # # load files from the dataset
         self.img_files, self.labels_str, self.masks = self.get_files()
@@ -83,13 +84,14 @@ class RealIAD(Dataset):
         
     def __getitem__(self, index):
         inputs = {}
-        
         if self.anom_only:
-            img_file = Path(self.img_files[self.anom_indices[index]])
-            label = self.labels[self.anom_indices[index]]
+            index = self.anom_indices[index]
+            img_file = Path(self.img_files[index])
+            label = self.labels[index]
         elif self.normal_only:
-            img_file = Path(self.img_files[self.normal_indices[index]])
-            label = self.labels[self.normal_indices[index]]
+            index = self.normal_indices[index]
+            img_file = Path(self.img_files[index])
+            label = self.labels[index]
         else:
             img_file = Path(self.img_files[index])
             label = self.labels[index]
@@ -170,11 +172,11 @@ class RealIAD(Dataset):
 if __name__ == "__main__":
     print(len(REALIAD_CLASSES))
     
-    data_dir = "/newssd/datasets/realiad_1024"
+    data_dir = "/mnt/c/Users/sshun/Downloads/realiad_1024/realiad_1024"
     category = "audiojack"
     input_res = 224
     split = "test"
-    meta_dir = "/newssd/datasets/realiad_meta/realiad_jsons"
+    meta_dir = "/mnt/c/Users/sshun/Downloads/realiad_jsons/realiad_jsons"
     transform = transforms.Compose([
         transforms.Resize((input_res, input_res), interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),
@@ -189,80 +191,26 @@ if __name__ == "__main__":
         transform=transform,
         is_mask=True,
         cls_label=True,
-        anom_only=False,
-        normal_only=False
+        anom_only=True,
+        normal_only=False,
     )
-    print(f"{len(dataset.masks)}")
-    print(f"{len(dataset.img_files)}")
-    print(f"{len(dataset.labels)}")
+    print(f"{len(dataset)}")
     
-    loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=4)
+    idx = 801
+    sample = dataset[idx]
+    org_img = Image.open(sample["filenames"])
+    org_img = org_img.convert('RGB')
+    org_img = org_img.resize((input_res, input_res), Image.BICUBIC)
     
-    # print(dataset.masks)
+    # save image
+    org_img.save("org_img.jpg")
     
-    # for i in range(len(dataset)):
-    #     if dataset.labels[i] == 0:
-    #         continue
-    #     else:
-    #         assert dataset.masks[i] is not None, f"Mask for index {i} is None"
-    #         print(f"Index {i}: {dataset.img_files[i]}, Label: {dataset.labels[i]}, Mask: {dataset.masks[i]}")
+    mask = sample["masks"]
+    mask = mask.numpy().astype(np.uint8) * 255
+    mask_img = Image.fromarray(mask)
+    mask_img.save("mask_img.jpg")
     
-    # for batch in loader:
-    #     print(batch["clsnames"], batch["clslabels"], batch["filenames"])
-    #     if "masks" in batch:
-    #         print("Masks available")
-    #     else:
-    #         print("No masks available")
-    #     break  # Just to test one batch
-    print(f"Dataset length: {len(dataset)}")
-    
-    # Calculate number of the all normal images accross all categories
-    normal_count = 0
-    for cls in REALIAD_CLASSES:
-        cls_dataset = RealIAD(
-            data_root=data_dir,
-            category=cls,
-            input_res=input_res,
-            split="train",
-            meta_dir=meta_dir,
-            transform=transform,
-            is_mask=True,
-            cls_label=True,
-            anom_only=False,
-            normal_only=False
-        )
-        normal_count += len(cls_dataset)
-        
-    for cls in REALIAD_CLASSES:
-        cls_dataset = RealIAD(
-            data_root=data_dir,
-            category=cls,
-            input_res=input_res,
-            split="test",
-            meta_dir=meta_dir,
-            transform=transform,
-            is_mask=True,
-            cls_label=True,
-            anom_only=False,
-            normal_only=True
-        )
-        normal_count += len(cls_dataset)
-    print(f"Total number of normal images across all categories: {normal_count}")
-    
-    # Calculate number of the all anomalous images accross all categories
-    anom_count = 0
-    for cls in REALIAD_CLASSES:
-        cls_dataset = RealIAD(
-            data_root=data_dir,
-            category=cls,
-            input_res=input_res,
-            split="test",
-            meta_dir=meta_dir,
-            transform=transform,
-            is_mask=True,
-            cls_label=True,
-            anom_only=True,
-            normal_only=False
-        )
-        anom_count += len(cls_dataset)
-    print(f"Total number of anomalous images across all categories: {anom_count}")
+    anom_type = sample["anom_type"]
+    clsnames = sample["clsnames"]
+    clslabels = sample["clslabels"]
+    print(f"Anomaly Type: {anom_type}, Class Name: {clsnames}, Class Label: {clslabels}")
