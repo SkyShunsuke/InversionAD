@@ -43,7 +43,8 @@ class DINOv2Wrapper(nn.Module):
 def get_backbone_feature_shape(model_type):
     if model_type == "efficientnet-b4":
         # return (272, 16, 16)
-        return (272, 32, 32)
+        # return (272, 32, 32)
+        return (272, 14, 14)
     elif model_type == "dinov2-small":
         return (384, 16, 16)
     elif model_type == "dinov2-base":
@@ -137,8 +138,8 @@ def get_backbone(**kwargs):
     elif 'efficientnet' in model_name:
         # net = get_efficientnet(model_name, pretrained=True, outblocks=[1, 5, 9, 21], outstrides=[2, 4, 8, 16])
         net =  get_efficientnet(model_name, **kwargs)
-        # return BackboneWrapper(net, scale_factors=[0.125, 0.25, 0.5, 1.0])
-        return BackboneWrapper(net, target_size=(32, 32))
+        return BackboneWrapper(net, scale_factors=[0.125, 0.25, 0.5, 1.0])
+        # return BackboneWrapper(net, target_size=(32, 32))
     elif 'dinov2' in model_name:
         net = get_dinov2(model_name, **kwargs)
         return net

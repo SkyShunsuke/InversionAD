@@ -36,7 +36,7 @@ data:
   num_workers: 4
   pin_memory: true
   train: true
-  transform_type: default
+  transform_type: imagenet
 optimizer:
   grad_clip: 1.0
   init_lr: 0.000001
@@ -51,10 +51,10 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_dit_gigant_ad_enet/all'
+  save_dir: 'results/exp_dit_gigant_ad_enet_aug1/all'
 evaluation:
   eval_interval: 50
-  eval_step: 4
+  eval_step: 3
 meta:
   seed: 42
   device: 'cuda'

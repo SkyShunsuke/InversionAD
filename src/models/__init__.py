@@ -3,6 +3,13 @@ from .unet import UNetModel
 from .dit import DiT
 from .vae import AutoencoderKL
 
+# unet parameters
+tiny  = dict(model_channels=128, channel_mult=(1,2,2,4), num_res_blocks=1, attention_resolutions=(8,))
+base  = dict(model_channels=192, channel_mult=(1,2,3,4), num_res_blocks=2, attention_resolutions=(8,4))
+# large = dict(model_channels=256, channel_mult=(1,2,3,4,4), num_res_blocks=3, attention_resolutions=(16,8,4))
+large = dict(model_channels=512, channel_mult=(1,2,3,4,4), num_res_blocks=3, attention_resolutions=(16,8,4,2))
+xl    = dict(model_channels=320, channel_mult=(1,1,2,2,4,4), num_res_blocks=3, attention_resolutions=(16,8,4,2))
+
 def create_vae(
     model_type: str,
     embed_dim = 16,
@@ -50,14 +57,28 @@ def create_denising_model(
             grad_checkpoint=grad_checkpoint
         )
     elif model_type == "unet":
+        # return UNetModel(
+        #     image_size=in_res,
+        #     in_channels=in_channels,
+        #     model_channels=model_channels,
+        #     out_channels=out_channels,
+        #     num_res_blocks=num_blocks,
+        #     attention_resolutions=attention_resolutions,
+        #     channel_mult=channel_mult,
+        #     num_classes=num_classes,
+        #     num_heads=num_heads,
+        #     num_heads_upsample=num_heads_upsample,
+        #     use_fp16=False,
+        # )
+        # use xl model
         return UNetModel(
             image_size=in_res,
             in_channels=in_channels,
-            model_channels=model_channels,
+            model_channels=large["model_channels"],
             out_channels=out_channels,
-            num_res_blocks=num_blocks,
-            attention_resolutions=attention_resolutions,
-            channel_mult=channel_mult,
+            num_res_blocks=large["num_res_blocks"],
+            attention_resolutions=large["attention_resolutions"],
+            channel_mult=large["channel_mult"],
             num_classes=num_classes,
             num_heads=num_heads,
             num_heads_upsample=num_heads_upsample,

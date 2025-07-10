@@ -274,10 +274,11 @@ def main(config):
 
         
         if (epoch + 1) % config["evaluation"]["eval_interval"] == 0:
-            aucs_dict = {}
+            all_results = {}
+            categories = [ds.category for ds in anom_dataset.datasets]
             for anom_loader, normal_loader in zip(anom_loaders, normal_loaders):
                 logger.info(f"Evaluating on {anom_loader.dataset.category} dataset")
-                auc = evaluate.evaluate_dist(
+                metrics_dict = evaluate.evaluate_dist(
                     model,
                     feature_extractor,
                     anom_loader,
@@ -290,12 +291,19 @@ def main(config):
                     world_size=world_size,
                     rank=rank,
                 )
-                aucs_dict[anom_loader.dataset.category] = auc
-            logger.info(f"AUCs: {aucs_dict}")
+                if rank == 0:
+                    all_results.update(metrics_dict)
+                dist.barrier()  # wait for all processes to finish evaluation
             
+            # Compute average AUC across all categories
+            avg_results = {}
+            keys = ["I-AUROC", "I-AP", "I-F1Max", "P-AUROC", "P-AP", "P-F1Max", "PRO", "mAD"]
+            for key in keys:
+                avg_results[key] = np.mean([all_results[cat][key] for cat in all_results.keys()])
+            logger.info(f"Average results: {avg_results}")
             
             if rank == 0:
-                current_auc = np.mean(list(aucs_dict.values()))
+                current_auc = avg_results["I-AUROC"]
                 if current_auc > best_auc:
                     best_auc = current_auc
                     save_path = save_dir / f"model_best.pth"
@@ -303,9 +311,28 @@ def main(config):
                     logger.info(f"Model is saved at {save_dir}")
 
                 if use_wandb:
-                    wandb.log({"AUC-avg": current_auc})
-                    for cat, auc in aucs_dict.items():
-                        wandb.log({f"AUC-{cat}": auc})
+                    for cat in categories:
+                        wandb.log({
+                            f"{cat}/I-AUROC": all_results[cat]["I-AUROC"],
+                            f"{cat}/I-AP": all_results[cat]["I-AP"],
+                            f"{cat}/I-F1Max": all_results[cat]["I-F1Max"],
+                            f"{cat}/P-AUROC": all_results[cat]["P-AUROC"],
+                            f"{cat}/P-AP": all_results[cat]["P-AP"],
+                            f"{cat}/P-F1Max": all_results[cat]["P-F1Max"],
+                            f"{cat}/PRO": all_results[cat]["PRO"],
+                            f"{cat}/mAD": all_results[cat]["mAD"]
+                        })
+                    
+                    wandb.log({
+                        "I-AUROC": current_auc,
+                        "I-AP": avg_results["I-AP"],
+                        "I-F1Max": avg_results["I-F1Max"],
+                        "P-AUROC": avg_results["P-AUROC"],
+                        "P-AP": avg_results["P-AP"],
+                        "P-F1Max": avg_results["P-F1Max"],
+                        "PRO": avg_results["PRO"],
+                        "mAD": avg_results["mAD"]
+                    })
                 logger.info(f"AUC: {current_auc} at epoch {epoch}")
             
             dist.barrier()  # wait for all processes to finish evaluation
