@@ -7,17 +7,34 @@ import torch.nn.functional as F
 from torchvision import models
 from torchvision.models import VGG19_Weights, EfficientNet_V2_S_Weights, EfficientNet_V2_M_Weights, EfficientNet_V2_L_Weights, ResNet50_Weights
 
-# from .efficientnet import build_efficient
-# from .resnet import wide_resnet101_2, wide_resnet50_2, resnet50
-
-from efficientnet import build_efficient
-from resnet import wide_resnet101_2, wide_resnet50_2, resnet50
+from .efficientnet import build_efficient
+from .resnet import wide_resnet101_2, wide_resnet50_2, resnet50
 
 from einops import rearrange
 
-class DINOv2Wrapper(nn.Module):
+class DINOWrapper(nn.Module):
     def __init__(self, model, out_blocks=None, out_res=None, **kwargs):
-        super(DINOv2Wrapper, self).__init__()
+        super(DINOWrapper, self).__init__()
+        self.model = model
+        self.out_blocks = out_blocks if out_blocks is not None else [-1]
+        self.out_res = out_res if out_res is not None else (14, 14)  # Default shape for DINO Base
+    
+    def forward(self, x):
+        """
+        Forward pass through the DINO model.
+        Args:
+            x (torch.Tensor): Input tensor of shape (B, C, H, W).
+        Returns:
+            torch.Tensor: Output features from the specified blocks.
+        """
+        outputs = self.model.forward_features(x)
+        outputs = outputs[:, 1:]  # Skip the first token (CLS token)
+        outputs = rearrange(outputs, 'b (h w) c -> b c h w', h=self.out_res[0], w=self.out_res[1])
+        return outputs, [outputs]  # Return the output and a list of features (single feature in this case)
+
+class DINO2Wrapper(nn.Module):
+    def __init__(self, model, out_blocks=None, out_res=None, **kwargs):
+        super(DINO2Wrapper, self).__init__()
         self.model = model
         self.out_blocks = out_blocks if out_blocks is not None else [-1]
         self.out_res = out_res if out_res is not None else (16, 16)  # Default shape for DINOv2 Base
@@ -51,28 +68,48 @@ def get_backbone_feature_shape(model_type):
         return (768, 16, 16)
     elif model_type == "dinov2-large":
         return (1024, 16, 16)
+    elif model_type == "dinov1-small":
+        return (384, 14, 14)
+    elif model_type == "dinov1-base":
+        return (768, 14, 14)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 
 def get_efficientnet(model_name, **kwargs):
     return build_efficient(model_name, **kwargs)
 
-def get_dinov2(model_name, **kwargs):
+def get_dino(model_name, **kwargs):
     if model_name == "dinov2-small":
         from transformers import Dinov2Model
         model = Dinov2Model.from_pretrained("facebook/dinov2-small", output_hidden_states=True).eval()
-        model = DINOv2Wrapper(model, **kwargs)
+        model = DINO2Wrapper(model, **kwargs)
         return model
     elif model_name == "dinov2-base":
         from transformers import Dinov2Model
         model = Dinov2Model.from_pretrained("facebook/dinov2-base", output_hidden_states=True).eval()
-        model = DINOv2Wrapper(model, **kwargs)
+        model = DINO2Wrapper(model, **kwargs)
         return model
     elif model_name == "dinov2-large":
         from transformers import Dinov2Model
         model = Dinov2Model.from_pretrained("facebook/dinov2-large", output_hidden_states=True).eval()
-        model = DINOv2Wrapper(model, **kwargs)
+        model = DINO2Wrapper(model, **kwargs)
         return model
+    elif model_name == "dinov1-small":
+        import timm
+        model = timm.create_model(
+            'vit_small_patch16_224.dino',
+            pretrained=True,
+            num_classes=0,  # remove classifier nn.Linear
+        ).eval()
+        return DINOWrapper(model, **kwargs)
+    elif model_name == "dinov1-base":
+        import timm
+        model = timm.create_model(
+            'vit_base_patch16_224.dino',
+            pretrained=True,
+            num_classes=0,  # remove classifier nn.Linear
+        ).eval()
+        return DINOWrapper(model, **kwargs)
     else:
         raise ValueError(f"Unsupported model name: {model_name}")
 
@@ -140,8 +177,11 @@ def get_backbone(**kwargs):
         net =  get_efficientnet(model_name, **kwargs)
         return BackboneWrapper(net, scale_factors=[0.125, 0.25, 0.5, 1.0])
         # return BackboneWrapper(net, target_size=(32, 32))
+    elif 'dinov1' in model_name:
+        net = get_dino(model_name, **kwargs)
+        return net
     elif 'dinov2' in model_name:
-        net = get_dinov2(model_name, **kwargs)
+        net = get_dino(model_name, **kwargs)
         return net
     elif 'vgg' in model_name:
         return BackboneModel(model_name, [3, 8, 17, 26])

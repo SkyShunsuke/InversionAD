@@ -12,7 +12,7 @@ diffusion:
   patch_size: 1
   channel_mult: [1,1,2,2]
 backbone: 
-    model_type: efficientnet-b4
+    model_type: dinov1-small
     outblocks:
       - 1
       - 5
@@ -51,9 +51,9 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_dit_gigant_mpdd_enet_224/all'
+  save_dir: 'results/exp_dit_gigant_mpdd_dinos/all'
 evaluation:
-  eval_interval: 1
+  eval_interval: 50
   eval_step: 3
 meta:
   seed: 42
