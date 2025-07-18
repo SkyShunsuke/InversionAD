@@ -1,6 +1,6 @@
 from .mlp import SimpleMLPAdaLN
 from .unet import UNetModel 
-from .dit import DiT, ODM
+from .dit import DiT, DiTMoE
 from .vae import AutoencoderKL
 
 # unet parameters
@@ -87,6 +87,21 @@ def create_denising_model(
         )
     elif model_type == "dit":
         return DiT(
+            input_size=in_res,
+            patch_size=patch_size,
+            in_channels=in_channels,
+            cond_channels=z_channels,
+            hidden_size=model_channels,
+            depth=num_blocks,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            class_dropout_prob=class_dropout_prob,
+            num_classes=num_classes,
+            learn_sigma=learn_sigma,
+            pos_embed=pos_embed
+        )
+    elif model_type == "dit_moe":
+        return DiTMoE(
             input_size=in_res,
             patch_size=patch_size,
             in_channels=in_channels,

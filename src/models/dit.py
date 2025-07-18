@@ -225,29 +225,6 @@ class SDPAAttention(nn.Module):
 #         return x
 
 import functools
-
-class DiTBlockWithoutAdaLN(nn.Module):
-    """
-    A DiT block without adaptive layer norm zero conditioning.
-    This is used for the final layer of DiT.
-    """
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4., **block_kwargs):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn  = SDPAAttention(hidden_size, num_heads, **block_kwargs)
-
-        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        mlp_hidden = int(hidden_size * mlp_ratio)
-        approx_gelu = functools.partial(nn.GELU, approximate="tanh")
-        self.mlp   = Mlp(hidden_size, mlp_hidden, act_layer=approx_gelu, drop=0.)
-    
-    def forward(self, x):
-        N = x.shape[1]
-        x = x + self.attn(self.norm1(x))
-        x = x[:, :N]  # keep original tokens only
-        x = x + self.mlp(self.norm2(x))
-        return x
-
 class DiTBlock(nn.Module):
     r"""A DiT block with adaptive layer-norm-zero conditioning."""
     def __init__(self, hidden_size, num_heads, mlp_ratio=4., **block_kwargs):
@@ -296,122 +273,6 @@ class FinalLayer(nn.Module):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
         x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
-        return x
-
-class FinalyLayerWithoutAdaLN(nn.Module):
-    """
-    The final layer of DiT without adaptive layer norm zero conditioning.
-    This is used for the final layer of DiT.
-    """
-    def __init__(self, hidden_size, patch_size, out_channels):
-        super().__init__()
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
-
-    def forward(self, x):
-        x = self.norm_final(x)
-        x = self.linear(x)
-        return x
-
-class ODM(nn.Module):
-    def __init__(
-        self, 
-        input_size=224,
-        patch_size=16, 
-        in_channels=3, 
-        hidden_size=384,
-        depth=4,
-        num_heads=8,
-        mlp_ratio=4.,
-        pos_embed: PosEmbedding = None
-    ):
-        super().__init__()
-        self.input_size = input_size
-        self.patch_size = patch_size
-        self.in_channels = in_channels
-        self.hidden_size = hidden_size
-        self.depth = depth
-        self.num_heads = num_heads
-        self.mlp_ratio = mlp_ratio
-        
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size)
-        self.x_embedder_linear = nn.Linear(in_channels, hidden_size, bias=True)
-        
-        num_patches = self.x_embedder.num_patches
-        self.num_patches = num_patches
-        # Will use fixed sin-cos embedding:
-        if pos_embed is None:
-            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size))
-            pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
-            self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
-        else:
-            assert pos_embed.shape == (1, num_patches, hidden_size), "pos_embed shape must be (1, N, C)"
-            self.pos_embed = nn.Parameter(pos_embed)
-        
-        self.blocks = nn.ModuleList([
-            DiTBlockWithoutAdaLN(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
-        ])
-        self.final_layer = FinalyLayerWithoutAdaLN(hidden_size, patch_size, self.in_channels)
-        
-        self.initialize_weights()
-    
-    def initialize_weights(self):
-        # Initialize transformer layers:
-        def _basic_init(module):
-            if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-        self.apply(_basic_init)
-
-        # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
-        w = self.x_embedder.proj.weight.data
-        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-        nn.init.constant_(self.x_embedder.proj.bias, 0)
-
-        # Zero-out output layers:
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
-        
-    def unpatchify(self, x):
-        """Convert sequence of tokens into image-like tensor.
-        Args:
-            x (Tensor): tensor of shape (B, N, patch_size*patch_size*in_channels)
-        Returns:
-            Tensor: tensor of shape (B, C, H, W)
-        """
-        C = self.in_channels
-        p = self.x_embedder.patch_size[0]
-        h = w = int(x.shape[1] ** 0.5)
-        assert h * w == x.shape[1]
-        
-        x = rearrange(x, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=h, w=w, p1=p, p2=p, c=C)
-        return x
-    
-    def forward(self, x, return_tokens=False):
-        """Apply model to an input batch.
-        Args:
-            x (Tensor): input tensor (B, C, H, W)
-        Returns:
-            Tensor: output tensor (B, C, H, W) or (B, N, C)
-        """
-        if len(x.shape) == 4:
-            # x: (B, C, H, W) -> (B, N, C)  
-            x = self.x_embedder(x)
-            # x = self.x_embedder_linear(x)  # (B, N, C)
-        elif len(x.shape) == 3:
-            # x: (B, N, C) -> (B, N, C)
-            x = self.x_embedder_linear(x)
-        else:
-            raise ValueError(f"Input tensor must be of shape (B, C, H, W) or (B, N, C), but got {x.shape}")
-        
-        x = x + self.pos_embed  # (B, N, C)
-        for block in self.blocks:
-            x = block(x)
-        x = self.final_layer(x)
-        if return_tokens:
-            return x
-        x = self.unpatchify(x)  # (B, C, H, W
         return x
 
 class DiT(nn.Module):
@@ -465,6 +326,291 @@ class DiT(nn.Module):
         
         self.blocks = nn.ModuleList([
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
+        ])
+        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+        
+        self.inherit_pos_embed = None
+        
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        # Initialize transformer layers:
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        self.apply(_basic_init)
+
+        # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
+        w = self.x_embedder.proj.weight.data
+        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        nn.init.constant_(self.x_embedder.proj.bias, 0)
+
+        # Initialize label embedding table:
+        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+
+        # Initialize timestep embedding MLP:
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+
+        # Zero-out adaLN modulation layers in DiT blocks:
+        for block in self.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+        # Zero-out output layers:
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.final_layer.linear.weight, 0)
+        nn.init.constant_(self.final_layer.linear.bias, 0)
+    
+    def unpatchify(self, x):
+        """Convert sequence of tokens into image-like tensor.
+        Args:
+            x (Tensor): tensor of shape (B, N, patch_size*patch_size*in_channels)
+        Returns:
+            Tensor: tensor of shape (B, C, H, W)
+        """
+        C = self.out_channels
+        p = self.x_embedder.patch_size[0]
+        h = w = int(x.shape[1] ** 0.5)
+        assert h * w == x.shape[1]
+        
+        x = rearrange(x, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=h, w=w, p1=p, p2=p, c=C)
+        return x
+
+    def forward(self, x, t, y=None, return_tokens=False, **kwargs):
+        """Apply model to an input batch.
+        Args:
+            x (Tensor): input tensor (B, C, H, W)
+            t (Tensor): timestep tensor (B, )
+            y (Tensor): label tensor (B, )
+        Returns:
+            Tensor: output tensor (B, C, H, W) or (B, N, C)
+        """
+        if len(x.shape) == 4:
+            # x: (B, C, H, W) -> (B, N, C)  
+            # Apply patch embedding and add positional embedding 
+            # we assume this type of input is VAE latents
+            x = self.x_embedder(x) + self.pos_embed
+        elif len(x.shape) == 3:
+            # x: (B, N, C)
+            # We assume this type of input is already patchified image, i.e., MIM model's outputs. 
+            x = self.x_embedder_linear(x)
+            B = x.size(0)
+            pos_embed = self.pos_embed.expand(B, -1, -1)  # (B, N, D)
+            x = x + pos_embed
+        else:
+            raise ValueError(f"Invalid input shape: {x.shape}")
+    
+        t = self.t_embedder(t)  # (B, D)
+        if self.num_classes is not None and y is not None:
+            y = self.y_embedder(y, self.training)  # (B, D)
+            cond = t + y
+        else:
+            cond = t
+        
+        for block in self.blocks:
+            x = block(x, cond)  # (B, N, C)
+        
+        x = self.final_layer(x, cond)  # (B, N, C)
+        if return_tokens:
+            return x  # (B, N, C)
+        else:
+            return self.unpatchify(x)  # (B, C, H, W)
+        
+    def forward_with_cfg(self, x, t, y, cfg_scale):
+        """
+        Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
+        """
+        # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
+        half = x[: len(x) // 2]
+        combined = torch.cat([half, half], dim=0)
+        model_out = self.forward(combined, t, y)
+        # For exact reproducibility reasons, we apply classifier-free guidance on only
+        # three channels by default. The standard approach to cfg applies it to all channels.
+        # This can be done by uncommenting the following line and commenting-out the line following that.
+        # eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
+        eps, rest = model_out[:, :3], model_out[:, 3:]
+        cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
+        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+        eps = torch.cat([half_eps, half_eps], dim=0)
+        return torch.cat([eps, rest], dim=1)
+
+def _approx_gelu():
+    """Factory to match the original DiTBlock's GELU impl (approximate ‑ "tanh")."""
+    return functools.partial(nn.GELU, approximate="tanh")
+
+class Top1Gate(nn.Module):
+    """Simple Top‑1 gate (a la Switch‑Transformer) with softmax + argmax routing."""
+
+    def __init__(self, hidden_size: int, num_experts: int):
+        super().__init__()
+        self.num_experts = num_experts
+        self.linear = nn.Linear(hidden_size, num_experts, bias=False)
+
+    def forward(self, x: torch.Tensor):
+        """
+        Args:
+            x: Tensor of shape (B * N, C)
+        Returns:
+            expert_idx: LongTensor of shape (B * N,) – index of chosen expert for every token
+        """
+        logits = self.linear(x)                     # (B*N, E)
+        probs = torch.softmax(logits, dim=-1)       # (B*N, E)
+        expert_idx = probs.argmax(dim=-1)           # Top‑1 routing
+        return expert_idx
+
+class MoE(nn.Module):
+    """Very lightweight Mixture‑of‑Experts layer (Top‑1 routing)."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        mlp_hidden: int,
+        num_experts: int = 4,
+        act_layer=_approx_gelu(),
+    ):
+        super().__init__()
+        self.num_experts = num_experts
+        self.experts = nn.ModuleList([
+            Mlp(hidden_size, mlp_hidden, act_layer=act_layer, drop=0.0)
+            for _ in range(num_experts)
+        ])
+        self.gate = Top1Gate(hidden_size, num_experts)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Token‑level Top‑1 expert dispatch & combine.
+
+        Args:
+            x: (B, N, C)
+        Returns:
+            (B, N, C) – expert‑processed output (same shape as input)
+        """
+        b, n, c = x.shape
+        x_flat = x.reshape(-1, c)                  # (B*N, C)
+        expert_indices = self.gate(x_flat)         # (B*N,)
+
+        # Prepare output container
+        out = torch.zeros_like(x_flat)
+
+        # Dispatch each token to its expert (no momentum‑based trick here; pure gather‑scatter)
+        for idx, expert in enumerate(self.experts):
+            mask = expert_indices == idx           # Bool mask for tokens going to this expert
+            if mask.any():
+                expert_in = x_flat[mask]           # (T_i, C)
+                expert_out = expert(expert_in)     # (T_i, C)
+                out[mask] = expert_out             # (B*N, C)
+
+        return out.reshape(b, n, c)
+    
+class DiTMoEBlock(nn.Module):
+    """DiT block where the original FFN is replaced with a Mixture‑of‑Experts FFN."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        num_experts: int = 4,
+        **block_kwargs,
+    ):
+        super().__init__()
+
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.attn = SDPAAttention(hidden_size, num_heads, **block_kwargs)
+
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        mlp_hidden = int(hidden_size * mlp_ratio)
+
+        # MoE FFN (replaces the single MLP)
+        self.moe = MoE(hidden_size, mlp_hidden, num_experts=num_experts, act_layer=_approx_gelu())
+
+        # AdaLN‑Zero conditioning
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 6 * hidden_size, bias=True),
+        )
+
+    def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+        """Same interface as original DiTBlock.
+
+        Args:
+            x: hidden tokens (B, N, C)
+            c: conditioning vector (B, C)
+        """
+        # AdaLN‑Zero modulation vectors
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = \
+            self.adaLN_modulation(c).chunk(6, dim=1)
+
+        n_tokens = x.shape[1]
+
+        # Multi‑head self‑attention path
+        x = x + gate_msa.unsqueeze(1) * self.attn(
+            modulate(self.norm1(x), shift_msa, scale_msa)
+        )
+        x = x[:, :n_tokens]  # keep original tokens only
+
+        # MoE‑FFN path
+        x = x + gate_mlp.unsqueeze(1) * self.moe(
+            modulate(self.norm2(x), shift_mlp, scale_mlp)
+        )
+        return x
+    
+
+class DiTMoE(nn.Module):
+    """
+    Diffusion Transformer expanded for various conditioning schemes with Mixture-of-Experts (MoE) blocks.
+    """
+    def __init__(
+        self, 
+        input_size=224,
+        patch_size=16, 
+        in_channels=3, 
+        cond_channels=384,
+        hidden_size=384,
+        depth=4,
+        num_heads=8,
+        mlp_ratio=4.,
+        class_dropout_prob=0.0,
+        num_classes=15,
+        learn_sigma=False,
+        pos_embed: PosEmbedding = None
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.patch_size = patch_size
+        self.in_channels = in_channels
+        self.cond_channels = cond_channels
+        self.hidden_size = hidden_size
+        self.out_channels = in_channels * 2 if learn_sigma else in_channels
+        self.depth = depth
+        self.num_heads = num_heads
+        self.mlp_ratio = mlp_ratio
+        self.class_dropout_prob = class_dropout_prob
+        self.num_classes = num_classes
+        self.learn_sigma = learn_sigma
+        self.num_experts = self.num_classes
+        
+        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size)
+        self.x_embedder_linear = nn.Linear(in_channels, hidden_size, bias=True)
+        self.t_embedder = TimestepEmbedder(hidden_size)
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        
+        num_patches = self.x_embedder.num_patches
+        self.num_patches = num_patches
+        # Will use fixed sin-cos embedding:
+        if pos_embed is None:
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size))
+            pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
+            self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+        else:
+            assert pos_embed.shape == (1, num_patches, hidden_size), "pos_embed shape must be (1, N, C)"
+            self.pos_embed = nn.Parameter(pos_embed)
+        
+        self.blocks = nn.ModuleList([
+            DiTMoEBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, num_experts=self.num_experts) for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         
