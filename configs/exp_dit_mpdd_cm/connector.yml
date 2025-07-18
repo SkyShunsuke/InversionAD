@@ -5,12 +5,17 @@ diffusion:
   z_channels: 768
   depth: 16
   width: 2048
-  num_sampling_steps: '100'
+  num_sampling_steps: '1000'
   ema_decay: 0.999
   learn_sigma: false
   grad_checkpoint: false
   patch_size: 1
   channel_mult: [1,1,2,2]
+  sigma_data: # 4.5
+  T: 1000
+  N: 3
+  timestep_scaling: 10
+  loss_type: 'l2'
 backbone: 
     model_type: efficientnet-b4
     outblocks:
@@ -27,10 +32,10 @@ backbone:
     stride: 16
 data:
   batch_size: 8
-  category: all
+  category: connector
   data_root: data/mpdd
-  dataset_name: mpdd_all
-  img_size: 384
+  dataset_name: mpdd
+  img_size: 224
   multi_category: false
   num_normal_samples: -1
   num_workers: 1
@@ -40,21 +45,21 @@ data:
 optimizer:
   grad_clip: 1.0
   init_lr: 0.000001
-  peak_lr: 0.00005
-  final_lr: 0.000005
-  num_epochs: 300
-  optimizer_name: adamw
-  scheduler_type: warmup_cosine
-  warmup_epochs: 40
+  peak_lr: 0.0
+  final_lr: 0.0
+  num_epochs: 100
+  optimizer_name: adam
+  scheduler_type: const
+  warmup_epochs: 0
   weight_decay: 0.0
 logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_dit_gigant_mpdd_enet384/all'
+  save_dir: 'results/exp_dit_gigant_mpdd_enet_cm/all'
 evaluation:
-  eval_interval: 50
-  eval_step: 3
+  eval_interval: 10
+  eval_step: 2
 meta:
   seed: 42
   device: 'cuda'

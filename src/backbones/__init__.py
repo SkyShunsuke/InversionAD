@@ -12,6 +12,15 @@ from .resnet import wide_resnet101_2, wide_resnet50_2, resnet50
 
 from einops import rearrange
 
+class PDNWrapper(nn.Module):
+    def __init__(self, model):
+        super(PDNWrapper, self).__init__()
+        self.model = model
+    
+    def forward(self, x):
+        out = self.model(x)
+        return out, [out]  # Return the output and a list of features (single feature in this case)
+
 class DINOWrapper(nn.Module):
     def __init__(self, model, out_blocks=None, out_res=None, **kwargs):
         super(DINOWrapper, self).__init__()
@@ -62,6 +71,7 @@ def get_backbone_feature_shape(model_type):
         # return (272, 16, 16)
         # return (272, 32, 32)
         return (272, 14, 14)
+        # return (272, 24, 24)
     elif model_type == "dinov2-small":
         return (384, 16, 16)
     elif model_type == "dinov2-base":
@@ -72,6 +82,10 @@ def get_backbone_feature_shape(model_type):
         return (384, 14, 14)
     elif model_type == "dinov1-base":
         return (768, 14, 14)
+    elif model_type == "pdn_small":
+        return (384, 16, 16)
+    elif model_type == "pdn_medium":
+        return (384, 16, 16)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 
@@ -165,13 +179,19 @@ def get_backbone_model(model_name):
         return models.resnet50(weights=ResNet50_Weights.DEFAULT)
     elif model_name == "identical":
         return nn.Identity()
+    elif model_name == "pdn_small":
+        return get_pdn_small()
+    elif model_name == "pdn_medium":
+        return get_pdn_medium()
 
 def get_backbone(**kwargs):
     model_name = kwargs['model_type']
     if 'pdn_small' in model_name:
-        return get_pdn_small(**kwargs)
+        net = get_pdn_small(**kwargs)
+        return PDNWrapper(net)
     elif 'pdn_medium' in model_name:
-        return get_pdn_medium(**kwargs)
+        net = get_pdn_medium(**kwargs)
+        return PDNWrapper(net)
     elif 'efficientnet' in model_name:
         # net = get_efficientnet(model_name, pretrained=True, outblocks=[1, 5, 9, 21], outstrides=[2, 4, 8, 16])
         net =  get_efficientnet(model_name, **kwargs)

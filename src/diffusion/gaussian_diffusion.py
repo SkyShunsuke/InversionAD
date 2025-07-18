@@ -511,6 +511,7 @@ class GaussianDiffusion:
             extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x.shape) * x
             - out["pred_xstart"]
         ) / extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x.shape)
+        # eps = out["eps"]
         alpha_bar_next = extract_into_tensor(self.alphas_cumprod_next, t, x.shape)
 
         # Equation 12. reversed

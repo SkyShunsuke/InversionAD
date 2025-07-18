@@ -27,10 +27,10 @@ backbone:
     stride: 16
 data:
   batch_size: 8
-  category: all
+  category: connector
   data_root: data/mpdd
-  dataset_name: mpdd_all
-  img_size: 384
+  dataset_name: mpdd
+  img_size: 224
   multi_category: false
   num_normal_samples: -1
   num_workers: 1
@@ -51,10 +51,10 @@ logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_dit_gigant_mpdd_enet384/all'
+  save_dir: 'results/test/all'
 evaluation:
-  eval_interval: 50
-  eval_step: 3
+  eval_interval: 1
+  eval_step: 2
 meta:
   seed: 42
   device: 'cuda'

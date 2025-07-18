@@ -16,6 +16,10 @@ from src.diffusion import create_diffusion, SpacedDiffusion
 from src.models import create_denising_model
 from src.models.vision_transformer import PosEmbedding
 
+import logging
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logger = logging.getLogger()
+
 class Denoiser(nn.Module):
     def __init__(
         self, 
@@ -221,7 +225,34 @@ class Denoiser(nn.Module):
             else:
                 raise ValueError(f"Invalid sampler type: {sampler}")
         return x_t
-    
+
+    def ddim_reverse_next(self, x_t: Tensor, t: Tensor, cls_label=None, cfg=1.0, eta=0.0) -> Tensor:
+        # assert torch.where(t == t[0], 1, 0).sum() == t.shape[0], "All timesteps must be the same"
+        
+        cls_embed = None
+        if cls_label is not None:
+            cls_embed = self.cls_embed(cls_label)
+        
+        if not cfg == 1.0:
+            # do classifer free guidance
+            model_kwargs = dict(c=cls_embed, cfg_scale=cfg)
+            sample_fn = self.net.forward_with_cfg
+        else:
+            # model_kwargs = dict(c=cls_embed, cfg_scale=cfg, z=z, mask_indices=mask_indices)
+            model_kwargs = dict(c=cls_label)
+            sample_fn = self.net.forward
+        
+        out = self.sample_diffusion.ddim_reverse_sample(
+            sample_fn,
+            x_t,
+            t,
+            clip_denoised=False,
+            model_kwargs=model_kwargs,
+            eta=eta
+        )
+        x_t = out["sample"]
+        return x_t
+
     def ddim_reverse_sample(self, x_t: Tensor, t: Tensor, cls_label=None, cfg=1.0, eta=0.0) -> Tensor:
         assert torch.where(t == t[0], 1, 0).sum() == t.shape[0], "All timesteps must be the same"
         
@@ -239,6 +270,7 @@ class Denoiser(nn.Module):
             sample_fn = self.net.forward
         
         indices = list(range(t[0].item(), int(self.num_sampling_steps)))
+        # logger.info(f"NFE: {len(indices)}")
         for i in indices:
             t = torch.tensor([i] * x_t.shape[0]).to(x_t.device)
             out = self.sample_diffusion.ddim_reverse_sample(

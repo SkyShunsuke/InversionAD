@@ -1,5 +1,5 @@
 diffusion:
-  model_type: 'dit'
+  model_type: 'mlp'
   num_classes: 15
   target_channels: 3
   z_channels: 768
@@ -46,12 +46,12 @@ optimizer:
   optimizer_name: adamw
   scheduler_type: warmup_cosine
   warmup_epochs: 40
-  weight_decay: 0.0
+  weight_decay: 0
 logging:
   log_interval: 10
   save_interval: 50
   save_images: false
-  save_dir: 'results/exp_dit_gigant_mpdd_enet384/all'
+  save_dir: 'results/exp_mlp_gigant_mpdd/all'
 evaluation:
   eval_interval: 50
   eval_step: 3

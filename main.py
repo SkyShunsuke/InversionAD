@@ -13,7 +13,7 @@ parser.add_argument(
     default="configs.yaml"
 )
 parser.add_argument(
-    "--task", type=str, choices=["train_dist", "train", "test"],
+    "--task", type=str, choices=["train_dist", "train", "test", "train_cm", "train_cm_dist", "train_odm", "train_odm_dist"],
 )
 parser.add_argument(
     "--devices", type=str, nargs="+", default=["cuda:0"],
@@ -32,7 +32,7 @@ parser.add_argument('--use_ema_model', action='store_true', help='Use EMA model 
 parser.add_argument('--use_best_model', action='store_true', help='Use best model for evaluation')
 
 
-def process_main(rank, fname, world_size, devices, task, port):
+def process_main(rank, fname, world_size, devices, task, port, args):
     import os
     os.environ['CUDA_VISIBLE_DEVICES'] = str(devices[rank].split(":")[-1])
     
@@ -71,6 +71,18 @@ def process_main(rank, fname, world_size, devices, task, port):
     elif task == "test":
         from src.evaluate import main as test_main
         test_main(params, args)
+    elif task == "train_cm":
+        from src.train_cm import main as train_cm_main
+        train_cm_main(params, args)
+    elif task == "train_cm_dist":
+        from src.train_cm_distributed import main as train_cm_dist_main
+        train_cm_dist_main(params, args)
+    elif task == "train_odm":
+        from src.train_odm import main as train_odm_main
+        train_odm_main(params, args)
+    elif task == "train_odm_dist":
+        from src.train_odm_distributed import main as train_odm_dist_main
+        train_odm_dist_main(params, args)
     else:
         raise ValueError(f"Task {task} should be specified")
     
@@ -83,8 +95,7 @@ if __name__ == "__main__":
         args.fname = os.path.join(args.save_dir, "config.yaml")
     
     if "dist" not in args.task:
-        args.devices = ["cuda:0"]
-        process_main(0, args.fname, 1, args.devices, args.task, args.port)
+        process_main(0, args.fname, 1, args.devices, args.task, args.port, args)
         exit(0)
     
     num_gpus = len(args.devices)
@@ -94,7 +105,7 @@ if __name__ == "__main__":
     for rank in range(num_gpus):
         p = mp.Process(
             target=process_main,
-            args=(rank, args.fname, num_gpus, args.devices, args.task, args.port)
+            args=(rank, args.fname, num_gpus, args.devices, args.task, args.port, args)
         )
         p.start()
         processes.append(p)

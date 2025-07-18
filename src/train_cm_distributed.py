@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 
 import torch
+from torch.utils.data import ConcatDataset
 import torch.distributed as dist
 import numpy as np
 from tqdm import tqdm
@@ -33,18 +34,80 @@ import torch.distributed as dist
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger()
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="InversionAD Training")
+def extract_into_tensor(a, t, x_shape):
+    b, *_ = t.shape
+    out = a.gather(-1, t)
+    return out.reshape(b, *((1,) * (len(x_shape) - 1)))
+
+def append_dims(x, target_dims):
+    """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
+    dims_to_append = target_dims - x.ndim
+    if dims_to_append < 0:
+        raise ValueError(f"input has {x.ndim} dims but target_dims is {target_dims}, which is less")
+    return x[(...,) + (None,) * dims_to_append]
+
+class DDIMSolver:
+    def __init__(self, alpha_cumprods, timesteps=1000, ddim_timesteps=50):
+        # DDIM sampling parameters
+        step_ratio = timesteps // ddim_timesteps
+        self.ddim_timesteps = (np.arange(1, ddim_timesteps + 1) * step_ratio).round().astype(np.int64) - 1
+        self.ddim_alpha_cumprods = alpha_cumprods[self.ddim_timesteps]
+        self.ddim_alpha_cumprods_prev = np.asarray(
+            [alpha_cumprods[0]] + alpha_cumprods[self.ddim_timesteps[:-1]].tolist()
+        )
+        # convert to torch tensors
+        self.ddim_timesteps = torch.from_numpy(self.ddim_timesteps).long()
+        self.ddim_alpha_cumprods = torch.from_numpy(self.ddim_alpha_cumprods)
+        self.ddim_alpha_cumprods_next = torch.concat([self.ddim_alpha_cumprods[1:], torch.tensor([0.0])])
+        self.ddim_alpha_cumprods_prev = torch.from_numpy(self.ddim_alpha_cumprods_prev)
+
+    def to(self, device):
+        self.ddim_timesteps = self.ddim_timesteps.to(device)
+        self.ddim_alpha_cumprods = self.ddim_alpha_cumprods.to(device)
+        self.ddim_alpha_cumprods_prev = self.ddim_alpha_cumprods_prev.to(device)
+        self.ddim_alpha_cumprods_next = self.ddim_alpha_cumprods_next.to(device)
+        return self
+
+    def ddim_step(self, pred_x0, pred_noise, timestep_index):
+        alpha_cumprod_prev = extract_into_tensor(self.ddim_alpha_cumprods_prev, timestep_index, pred_x0.shape)
+        dir_xt = (1.0 - alpha_cumprod_prev).sqrt() * pred_noise
+        x_prev = alpha_cumprod_prev.sqrt() * pred_x0 + dir_xt
+        return x_prev
     
-    parser.add_argument('--config_path', type=str, default='configs/config.yaml', help='Path to the config file')
-    parser.add_argument(
-        "--devices", type=str, nargs="+", default=["cuda:0"],
-    )
-    parser.add_argument(
-        "--port", type=int, default=29500,
-    )
-    args = parser.parse_args()
-    return args
+    def ddim_reverse_step(self, pred_x0, pred_noise, timestep_index):
+        alpha_cumprod_next = extract_into_tensor(self.ddim_alpha_cumprods_next, timestep_index, pred_x0.shape)
+        dir_xt = (1.0 - alpha_cumprod_next).sqrt() * pred_noise
+        x_next = alpha_cumprod_next.sqrt() * pred_x0 + dir_xt
+        return x_next
+
+def predicted_origin(model_output, timesteps, sample, prediction_type, alphas, sigmas):
+    if prediction_type == "epsilon":
+        sigmas = extract_into_tensor(sigmas, timesteps, sample.shape)
+        alphas = extract_into_tensor(alphas, timesteps, sample.shape)
+        pred_x_0 = (sample - sigmas * model_output) / alphas
+    elif prediction_type == "v_prediction":
+        sigmas = extract_into_tensor(sigmas, timesteps, sample.shape)
+        alphas = extract_into_tensor(alphas, timesteps, sample.shape)
+        pred_x_0 = alphas * sample - sigmas * model_output
+    else:
+        raise ValueError(f"Prediction type {prediction_type} currently not supported.")
+    return pred_x_0
+
+def predicted_last(model_output, timesteps, sample, prediction_type, alphas, sigmas):
+    if prediction_type == "epsilon":
+        sigmas = extract_into_tensor(sigmas, timesteps, sample.shape)
+        alphas = extract_into_tensor(alphas, timesteps, sample.shape)
+        pred_x_0 = (sample - sigmas * model_output) / alphas
+        pred_x_t = alphas * pred_x_0 + sigmas * model_output
+    elif prediction_type == "v_prediction":
+        sigmas = extract_into_tensor(sigmas, timesteps, sample.shape)
+        alphas = extract_into_tensor(alphas, timesteps, sample.shape)
+        pred_x_0 = alphas * sample - sigmas * model_output
+        pred_x_t = (sample + pred_x_0 * model_output) / alphas
+    else:
+        raise ValueError(f"Prediction type {prediction_type} currently not supported.")
+
+    return pred_x_t
 
 def postprocess(x):
     x = x / 2 + 0.5
@@ -61,6 +124,23 @@ def convert2image(x):
         return x.permute(0, 2, 3, 1).cpu().numpy()
     else:
         return x.cpu().numpy()
+    
+def expand_tensor(tensor, target_shape):
+    dims = len(target_shape)
+    if tensor.dim() == dims:
+        return tensor
+    else:
+        # add new dimensions to the tensor
+        for _ in range(dims - tensor.dim()):
+            tensor = tensor.unsqueeze(-1)
+        return tensor
+    
+def scalings_for_boundary_conditions(timestep, sigma_data=0.5, timestep_scaling=10.0, total_steps=1000):
+    timestep = total_steps - (timestep + 1)  # convert to reverse timestep
+    ts_scaled = timestep / timestep_scaling
+    c_skip = sigma_data**2 / (ts_scaled ** 2 + sigma_data**2)
+    c_out = ts_scaled / (ts_scaled ** 2 + sigma_data**2) ** 0.5
+    return c_skip, c_out
 
 @torch.no_grad()
 def extract_features(x, model):
@@ -78,7 +158,7 @@ def load_config(config_path):
             logger.info(exc)
     return config
     
-def main(config):
+def main(config, args):
 
     try:
         mp.set_start_method('spawn')
@@ -171,13 +251,45 @@ def main(config):
         drop_last=False,
     ) for normal_ds, normal_sampler in zip(normal_dataset.datasets, normal_samplers)]
     
+    
+    T = config['diffusion']['T']  # default: 1000
+    N = config['diffusion']['N']  # default: 10
+    ts = config['diffusion']['timestep_scaling']  # default: 100
+    loss_type = config['diffusion']['loss_type']  # default: 'huber'
+    sigma_data = config['diffusion'].get('sigma_data', 0.5)  # default: 0.5
+    huber_c = config['diffusion'].get('huber_c', 0.001)  # default: 0.001
+    print(f"Using T: {T}, N: {N}, timestep scaling: {ts}, loss type: {loss_type}")
     diff_in_sh = get_backbone_feature_shape(model_type=config['backbone']['model_type'])
     logger.info(f"Using input shape {diff_in_sh} for the diffusion model")
     model: Denoiser = get_denoiser(**config['diffusion'], input_shape=diff_in_sh)
+    
+    checkpoint_path = os.path.join(args.save_dir, 'model_best.pth')
+    model_ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    is_multi_class = isinstance(normal_dataset, ConcatDataset) or isinstance(anom_dataset, ConcatDataset)
+    if is_multi_class:
+        # for distributed training, the model state dict keys may have a prefix
+        # Remove the prefix if it exists
+        if 'module.' in list(model_ckpt.keys())[0]:
+            model_ckpt = {k.replace('module.', ''): v for k, v in model_ckpt.items()}
+            
+        if '_orig_mod.' in list(model_ckpt.keys())[0]:
+            model_ckpt = {k.replace('_orig_mod.', ''): v for k, v in model_ckpt.items()}
+    model.load_state_dict(model_ckpt, strict=True)
+    logger.info(f"Model is loaded from {checkpoint_path}")
+
     ema_decay = config['diffusion']['ema_decay']
     model_ema = copy.deepcopy(model)
     model.to(device)
     model_ema.to(device)
+
+    # solver
+    solver = DDIMSolver(
+        model.train_diffusion.alphas_cumprod,
+        timesteps=T,
+        ddim_timesteps=N
+    ).to(device)
+    alpha_schedule = torch.sqrt(torch.from_numpy(model.train_diffusion.alphas_cumprod)).to(device)
+    sigma_schedule = torch.sqrt(1 - torch.from_numpy(model.train_diffusion.alphas_cumprod)).to(device)
     
     model = torch.compile(model, fullgraph=True)
     model = torch.nn.parallel.DistributedDataParallel(model, static_graph=True)
@@ -211,7 +323,7 @@ def main(config):
     logger.info(f"Steps per epoch: {len(train_loader)}")
     
     es_count = 0
-    best_auc = 0
+    best_mad = 0
     import time
 
     for epoch in range(config['optimizer']['num_epochs']):
@@ -228,11 +340,76 @@ def main(config):
 
             # Feature extraction (forward pass of backbone)
             with torch.no_grad():
-                x, x_list = feature_extractor(img)  # (B, c, h, w)
+                z, _ = feature_extractor(img)  # (B, c, h, w)
             t3 = time.time()
 
-            # Model forward and backward
-            loss = model(x, labels)  
+            # First sample timesteps from uniform distribution
+            topk = T // N
+            index = torch.randint(0, N, (img.shape[0],), device=device).long()  # (B,)
+            max_timestep = solver.ddim_timesteps[N - 1]
+            start_t = solver.ddim_timesteps[index]  # (B,)
+            t = torch.clamp(start_t + topk, min=0, max=max_timestep)
+
+            # coefs
+            c_skip_start, c_out_start= scalings_for_boundary_conditions(start_t, timestep_scaling=ts)
+            c_skip_start, c_out_start = [append_dims(x, z.ndim) for x in [c_skip_start, c_out_start]]
+            c_skip, c_out = scalings_for_boundary_conditions(t, timestep_scaling=ts)
+            c_skip, c_out = [append_dims(x, z.ndim) for x in [c_skip, c_out]]
+            
+            # Then, sample x_n sample 
+            z_t = model.module.q_sample(z, t).float()
+
+            # online predition
+            noise_pred = model.module.net(z_t, start_t)  # (B, c, h, w)
+            pred_x_T = predicted_last(
+                noise_pred,
+                start_t,
+                z_t,
+                "epsilon",
+                alpha_schedule,
+                sigma_schedule
+            )
+            model_pred = c_skip_start * z_t + c_out_start * pred_x_T
+
+            # Target prediction
+            with torch.no_grad():
+                with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    teacher_pred = model_ema.module.net(z_t, start_t)  # (B, c, h, w)
+                    pred_x0 = predicted_origin(
+                        teacher_pred,
+                        start_t,
+                        z_t,
+                        "epsilon",
+                        alpha_schedule,
+                        sigma_schedule
+                    )
+                    # x_prev = solver.ddim_step(pred_x0, teacher_pred, index).float()
+                    x_next = solver.ddim_reverse_step(pred_x0, teacher_pred, index).float()
+            
+            # Get target 
+            with torch.no_grad():
+                with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    target_noise_pred = model_ema.module.net(x_next, t)  # (B, c, h, w)
+                pred_x_T = predicted_last(
+                    target_noise_pred,
+                    t,
+                    x_next,
+                    "epsilon",
+                    alpha_schedule,
+                    sigma_schedule
+                )
+                target = c_skip * x_next + c_out * pred_x_T
+            
+            # compute the consistency loss
+            if loss_type == "l2":
+                loss = torch.nn.functional.mse_loss(model_pred.float(), target.float(), reduction='mean')
+            elif loss_type == "huber":
+                loss = torch.mean(
+                    torch.sqrt((model_pred.float() - target.float()) ** 2 + huber_c**2) - huber_c
+                )
+            else:
+                raise ValueError(f"Loss type {loss_type} is not supported.")
+            
             optimizer.zero_grad()
             loss.backward()
             if config['optimizer']['grad_clip']:
@@ -279,7 +456,7 @@ def main(config):
             categories = [ds.category for ds in anom_dataset.datasets]
             for anom_loader, normal_loader in zip(anom_loaders, normal_loaders):
                 logger.info(f"Evaluating on {anom_loader.dataset.category} dataset")
-                metrics_dict = evaluate.evaluate_dist(
+                metrics_dict = evaluate.evaluate_dist_cm(
                     model,
                     feature_extractor,
                     anom_loader,
@@ -304,9 +481,9 @@ def main(config):
             logger.info(f"Average results: {avg_results}")
             
             if rank == 0:
-                current_auc = avg_results["I-AUROC"]
-                if current_auc > best_auc:
-                    best_auc = current_auc
+                current_mad = avg_results["mAD"]
+                if current_mad > best_mad:
+                    best_mad = current_mad
                     save_path = save_dir / f"model_best.pth"
                     torch.save(model.state_dict(), save_path)
                     logger.info(f"Model is saved at {save_dir}")
@@ -325,7 +502,7 @@ def main(config):
                         })
                     
                     wandb.log({
-                        "I-AUROC": current_auc,
+                        "I-AUROC": avg_results["I-AUROC"],
                         "I-AP": avg_results["I-AP"],
                         "I-F1Max": avg_results["I-F1Max"],
                         "P-AUROC": avg_results["P-AUROC"],
@@ -334,7 +511,7 @@ def main(config):
                         "PRO": avg_results["PRO"],
                         "mAD": avg_results["mAD"]
                     })
-                logger.info(f"AUC: {current_auc} at epoch {epoch}")
+                logger.info(f"mAD: {current_mad} at epoch {epoch}")
             
             dist.barrier()  # wait for all processes to finish evaluation
     logger.info("Training is done!")

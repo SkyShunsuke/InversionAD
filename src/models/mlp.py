@@ -8,6 +8,9 @@ import enum
 
 from typing import Tuple
 
+from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+from einops import rearrange
+
 def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
     return x * (1 + scale) + shift
 
@@ -74,8 +77,11 @@ class ResBlock(nn.Module):
     def forward(self, x, y):
         # conditioning
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(y).chunk(3, dim=-1)  # (B, C)
-        h = modulate(self.in_ln(x), shift_mlp, scale_mlp)  # (B, C)
-        h = self.mlp(h)  
+        shift_mlp = shift_mlp.unsqueeze(1)  # (B, 1, C)
+        scale_mlp = scale_mlp.unsqueeze(1)  # (B, 1, C)
+        gate_mlp = gate_mlp.unsqueeze(1)  # (B, 1, C)
+        h = modulate(self.in_ln(x), shift_mlp, scale_mlp)  # (B, N, C)
+        h = self.mlp(h)  # (B, N, C)
         return x + gate_mlp * h
 
 class FinalLayer(nn.Module):
@@ -90,18 +96,23 @@ class FinalLayer(nn.Module):
     
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
+        shift = shift.unsqueeze(1)  # (B, 1, C)
+        scale = scale.unsqueeze(1)  # (B, 1, C)
         x = modulate(self.norm_final(x), shift, scale)
+        # Apply final linear layer
         x = self.linear(x)
         return x
 
 class SimpleMLPAdaLN(nn.Module):
     def __init__(
         self,
+        input_size: int,
         in_channels: int,   
         model_channels: int,
         out_channels: int,
         z_channels: int,
         num_blocks: int,
+        patch_size: int = 1,
         grad_checkpoint: bool = False
     ):
         super().__init__()
@@ -112,10 +123,9 @@ class SimpleMLPAdaLN(nn.Module):
         self.num_blocks = num_blocks
         self.grad_checkpoint = grad_checkpoint
         
+        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, model_channels)
         self.time_embed = TimestepEmbedder(model_channels)
         self.cond_embed = nn.Linear(z_channels, model_channels)
-        
-        self.input_proj = nn.Linear(in_channels, model_channels)
         
         res_blocks = []
         for _ in range(num_blocks):
@@ -133,6 +143,9 @@ class SimpleMLPAdaLN(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
         self.apply(_basic_init)
+        w = self.x_embedder.proj.weight.data
+        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        nn.init.constant_(self.x_embedder.proj.bias, 0)        
 
         nn.init.normal_(self.time_embed.mlp[0].weight, std=0.02)
         nn.init.normal_(self.time_embed.mlp[2].weight, std=0.02)
@@ -147,8 +160,23 @@ class SimpleMLPAdaLN(nn.Module):
         
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+
+    def unpatchify(self, x):
+        """Convert sequence of tokens into image-like tensor.
+        Args:
+            x (Tensor): tensor of shape (B, N, patch_size*patch_size*in_channels)
+        Returns:
+            Tensor: tensor of shape (B, C, H, W)
+        """
+        C = self.out_channels
+        p = self.x_embedder.patch_size[0]
+        h = w = int(x.shape[1] ** 0.5)
+        assert h * w == x.shape[1]
         
-    def forward(self, x, t, y):
+        x = rearrange(x, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=h, w=w, p1=p, p2=p, c=C)
+        return x
+        
+    def forward(self, x, t, y=None, return_tokens=False, **kwargs):
         """Apply model to an input batch
         Args:
             x (Tensor): input tensor (B, C)
@@ -157,14 +185,13 @@ class SimpleMLPAdaLN(nn.Module):
         Returns:
             Tensor: output tensor (B, C)
         """
-        import pdb; pdb.set_trace()
-        
-        x = self.input_proj(x)
+        x = self.x_embedder(x)  # (B, N, C)
         t = self.time_embed(t)
-        y = self.cond_embed(y)
-        
-        y = t + y
-        
+        if y is not None:
+            y = self.cond_embed(y)
+            y = t + y
+        else:
+            y = t
         if self.grad_checkpoint and not torch.jit.is_scripting():
             for block in self.res_blocks:
                 x = torch.utils.checkpoint.checkpoint(block, x, y)
@@ -173,7 +200,10 @@ class SimpleMLPAdaLN(nn.Module):
                 x = block(x, y)
         
         x = self.final_layer(x, y)
-        return x
+        if return_tokens:
+            return x  # (B, N, C)
+        else:
+            return self.unpatchify(x)  # (B, C, H, W)
         
     def forward_with_cfg(self, x, t, c, cfg_scale):
         half = x[:len(x)//2]  # (B/2, C)

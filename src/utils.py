@@ -310,6 +310,34 @@ class WarmupCosineAnnealingScheduler:
         """Returns the last set learning rate."""
         return self.last_lr
     
+class ConstScheduler:
+    def __init__(self, optimizer, init_lr: float):
+        """
+        Args:
+            optimizer (Optimizer): The optimizer to update.
+            init_lr (float): Initial learning rate.
+        """
+        self.optimizer = optimizer
+        self.init_lr = init_lr
+        self.step_num = 0
+        
+        # Initialize the optimizer's learning rate.
+        self._set_lr(init_lr)
+
+    def _set_lr(self, lr: float):
+        """Sets the learning rate for all parameter groups."""
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        self.last_lr = lr
+
+    def step(self):
+        """Updates the learning rate based on the current step."""
+        self.step_num += 1
+        self._set_lr(self.init_lr)
+
+    def get_last_lr(self):
+        """Returns the last set learning rate."""
+        return self.last_lr
 
 def get_optimizer(
     models: List[nn.Module],
@@ -343,6 +371,14 @@ def get_optimizer(
             params,
             lr=init_lr,
             weight_decay=weight_decay,
+        )
+    elif optimizer_name == "radam":
+        from torch.optim import RAdam
+        optimizer = RAdam(
+            params,
+            lr=init_lr,
+            weight_decay=weight_decay,
+            betas=kwargs.get("betas", (0.9, 0.999)),
         )
     elif optimizer_name == "adamw":
         optimizer = AdamW(
@@ -398,6 +434,11 @@ def get_lr_scheduler(
             t_total=num_epochs * iter_per_epoch,
             init_lr=init_lr,
             peak_lr=peak_lr,
+        )
+    elif scheduler_type == "const":
+        return ConstScheduler(
+            optimizer=optimizer,
+            init_lr=init_lr,
         )
     else:
         raise ValueError(f"Invalid scheduler: {scheduler_type}")

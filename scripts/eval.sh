@@ -9,9 +9,8 @@ python main.py \
     --task test \
     --devices cuda:0 \
     --eval_strategy inversion \
-    --save_dir results/exp_dit_gigant_realiad_enet/all \
-    --use_best_model \
-    --eval_step 4 \
+    --save_dir results/exp_dit_gigant_realiad_enet384/all \
+    --eval_step 3 \
 
 # python ./src/evaluate.py \
 #     --eval_strategy inversion \
