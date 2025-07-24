@@ -35,6 +35,13 @@ conda env create -f environment.yaml
 conda activate invad
 ```
 
+### Set up for Evaluation
+To run the evaluation, you need to install the `adeval` package. You can do this by running the following command:
+
+```bash 
+cd src && git clone https://github.com/winggan/adeval.git && cd ..
+```
+
 ### Dataset
 Download [MVTecAD](https://www.mvtec.com/company/research/datasets/mvtec-ad) dataset with the following command:
 ```bash
