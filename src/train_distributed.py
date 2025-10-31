@@ -2,7 +2,6 @@
 import os
 import sys
 from torch.utils.data import DataLoader
-from tensorboardX import SummaryWriter
 
 import torch
 import torch.distributed as dist
@@ -22,7 +21,6 @@ from src.backbones import get_backbone, get_backbone_feature_shape
 import src.evaluate as evaluate
 
 from einops import rearrange
-from sklearn.metrics import roc_curve, roc_auc_score
 
 import wandb
 from dotenv import load_dotenv
@@ -34,7 +32,7 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger()
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="InversionAD Training")
+    parser = argparse.ArgumentParser(description="InvAD Training")
     
     parser.add_argument('--config_path', type=str, default='configs/config.yaml', help='Path to the config file')
     parser.add_argument(
@@ -50,10 +48,6 @@ def postprocess(x):
     x = x / 2 + 0.5
     return x.clamp(0, 1)
 
-def postprocess_lpips(x):
-    # -> [-1, 1]
-    x = x * 2 - 1  # Assume x is in [0, 1]
-
 def convert2image(x):
     if x.dim() == 3:
         return x.permute(1, 2, 0).cpu().numpy()
@@ -61,14 +55,6 @@ def convert2image(x):
         return x.permute(0, 2, 3, 1).cpu().numpy()
     else:
         return x.cpu().numpy()
-
-@torch.no_grad()
-def extract_features(x, model):
-    b, c, h, w = x.shape
-    out = model.forward_features(x)  # (B, 197, d)
-    out = out[:, 1:]  # remove the first token
-    out = rearrange(out, 'b (h w) d -> b d h w', h=14, w=14)
-    return out
 
 def load_config(config_path):
     with open(config_path, 'r') as stream:
@@ -125,11 +111,6 @@ def main(config):
     dataset_config['normal_only'] = True
     normal_dataset = build_dataset(**dataset_config)
     
-    # anom_loaders = [DataLoader(anom_ds, batch_size=1, shuffle=False, num_workers=1, drop_last=False, pin_memory=True) for anom_ds in anom_dataset.datasets]
-    # normal_loaders = [DataLoader(normal_ds, batch_size=1, shuffle=False, num_workers=1, drop_last=False, pin_memory=True) for normal_ds in normal_dataset.datasets]
-
-    # train_loader = DataLoader(train_dataset, batch_size, shuffle=True, \
-    #     pin_memory=config['data']['pin_memory'], num_workers=config['data']['num_workers'], drop_last=True, pin_memory=True)
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         dataset=train_dataset,
         num_replicas=world_size,
@@ -179,7 +160,6 @@ def main(config):
     model.to(device)
     model_ema.to(device)
     
-    model = torch.compile(model, fullgraph=True)
     model = torch.nn.parallel.DistributedDataParallel(model, static_graph=True)
     model_ema = torch.nn.parallel.DistributedDataParallel(model_ema, static_graph=True)
     for p in model_ema.parameters():
@@ -199,7 +179,6 @@ def main(config):
 
     save_dir = Path(config['logging']['save_dir'])
     save_dir.mkdir(parents=True, exist_ok=True)
-    tb_writer = SummaryWriter(log_dir=str(save_dir))
 
     # save config
     save_path = save_dir / "config.yaml"
@@ -228,7 +207,7 @@ def main(config):
 
             # Feature extraction (forward pass of backbone)
             with torch.no_grad():
-                x, x_list = feature_extractor(img)  # (B, c, h, w)
+                x, _ = feature_extractor(img)  # (B, c, h, w)
             t3 = time.time()
 
             # Model forward and backward
@@ -251,11 +230,6 @@ def main(config):
             # Logging
             if i % config["logging"]["log_interval"] == 0 and rank == 0:
                 logger.info(f"Epoch {epoch}, Iter {i}, Loss {loss.item():.4f}, LR {scheduler.get_last_lr():.6f}")
-                # logger.info(
-                #     f"Timings [ms] | Data: {(t2 - t1) * 1000:.2f} | Forward: {(t3 - t2) * 1000:.2f} | "
-                #     f"Backward: {(t4 - t3) * 1000:.2f} | EMA+Sched: {(t5 - t4) * 1000:.2f} | Total: {(t5 - t0) * 1000:.2f}"
-                # )
-                tb_writer.add_scalar("Loss", loss.item(), epoch * len(train_loader) + i)
                 if use_wandb:
                     wandb.log({
                         "Loss": loss.item(),
@@ -267,7 +241,7 @@ def main(config):
                     })
 
         if (epoch + 1) % config["logging"]["save_interval"] == 0 and rank == 0:
-            save_path = save_dir / f"model_latest.pth"
+            save_path = save_dir / f"model_latest_{epoch}.pth"
             torch.save(model.state_dict(), save_path)
             save_path = save_dir / f"model_ema_latest.pth"
             torch.save(model_ema.state_dict(), save_path)
@@ -338,7 +312,6 @@ def main(config):
             
             dist.barrier()  # wait for all processes to finish evaluation
     logger.info("Training is done!")
-    tb_writer.close()
     
     # save model
     save_path = save_dir / "model_latest.pth"

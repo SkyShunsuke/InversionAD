@@ -2,6 +2,7 @@ data/
 weights/
 results/
 wandb/
+samples/
 adeval/
 
 # Byte-compiled / optimized / DLL files

@@ -194,22 +194,6 @@ def imask_to_pidx(mask, h, w, patch_size):
     patch_idx = ppos_to_pidx(patch_pos, h, w)
     return patch_idx
 
-
-def calculate_mask_coverage(mask_batch, h, w):
-    """Calculate mask coverage. 
-
-    Args:
-        mask_batch (tensor): Indices of masked patches. Shape: (B, L)
-        h (int): Height of the feature map
-        w (int): Width of the feature map
-    Returns:
-        mask_coverage (float): Mask coverage
-    """
-    mask = pidx_to_pmask(mask_batch, h, w)  # (B, h, w)
-    mask_or = torch.any(mask, dim=0).float()  # (h, w)
-    mask_coverage = torch.mean(mask_or)  # scalar
-    return mask_coverage  
-
 class AverageMeter(object):
     def __init__(self):
         self.reset()

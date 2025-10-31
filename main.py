@@ -13,7 +13,7 @@ parser.add_argument(
     default="configs.yaml"
 )
 parser.add_argument(
-    "--task", type=str, choices=["train_dist", "train", "test", "train_cm", "train_cm_dist", "train_odm", "train_odm_dist"],
+    "--task", type=str, choices=["train_dist", "train", "test"],
 )
 parser.add_argument(
     "--devices", type=str, nargs="+", default=["cuda:0"],
@@ -71,18 +71,6 @@ def process_main(rank, fname, world_size, devices, task, port, args):
     elif task == "test":
         from src.evaluate import main as test_main
         test_main(params, args)
-    elif task == "train_cm":
-        from src.train_cm import main as train_cm_main
-        train_cm_main(params, args)
-    elif task == "train_cm_dist":
-        from src.train_cm_distributed import main as train_cm_dist_main
-        train_cm_dist_main(params, args)
-    elif task == "train_odm":
-        from src.train_odm import main as train_odm_main
-        train_odm_main(params, args)
-    elif task == "train_odm_dist":
-        from src.train_odm_distributed import main as train_odm_dist_main
-        train_odm_dist_main(params, args)
     else:
         raise ValueError(f"Task {task} should be specified")
     

@@ -1,11 +1,7 @@
 
 import os
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 import torch
 from torch.utils.data import DataLoader
-from tensorboardX import SummaryWriter
-
 import numpy as np
 from tqdm import tqdm
 from pathlib import Path
@@ -37,20 +33,15 @@ except ImportError:
     pass
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="InversionAD Training")
+    parser = argparse.ArgumentParser(description="InvAD Training")
     
     parser.add_argument('--config_path', type=str, default='configs/config.yaml', help='Path to the config file')
-
     args = parser.parse_args()
     return args
 
 def postprocess(x):
     x = x / 2 + 0.5
     return x.clamp(0, 1)
-
-def postprocess_lpips(x):
-    # -> [-1, 1]
-    x = x * 2 - 1  # Assume x is in [0, 1]
 
 def convert2image(x):
     if x.dim() == 3:
@@ -59,14 +50,6 @@ def convert2image(x):
         return x.permute(0, 2, 3, 1).cpu().numpy()
     else:
         return x.cpu().numpy()
-
-@torch.no_grad()
-def extract_features(x, model):
-    b, c, h, w = x.shape
-    out = model.forward_features(x)  # (B, 197, d)
-    out = out[:, 1:]  # remove the first token
-    out = rearrange(out, 'b (h w) d -> b d h w', h=14, w=14)
-    return out
     
 def main(config):
     pprint(config)
@@ -121,10 +104,9 @@ def main(config):
         pass
     else:
         scheduler = get_lr_scheduler(optimizer, **config['optimizer'], iter_per_epoch=len(train_loader))
-
+    
     save_dir = Path(config['logging']['save_dir'])
     save_dir.mkdir(parents=True, exist_ok=True)
-    tb_writer = SummaryWriter(log_dir=str(save_dir))
 
     # save config
     save_path = save_dir / "config.yaml"
@@ -139,8 +121,7 @@ def main(config):
     model.train()
     print(f"Steps per epoch: {len(train_loader)}")
     
-    es_count = 0
-    best_auc = 0
+    best_mad = 0
     for epoch in range(config['optimizer']['num_epochs']):
         for i, data in enumerate(train_loader):
             img, labels = data["samples"], data["clslabels"]    # (B, C, H, W), (B,)
@@ -148,9 +129,8 @@ def main(config):
             labels = labels.to(device)
             
             with torch.no_grad():
-                x, x_list = feature_extractor(img)  # (B, c, h, w)
-                
-            loss = model(x, labels)  
+                x, _ = feature_extractor(img)  # (B, c, h, w)
+            loss = model(x, labels)
             
             # backward
             optimizer.zero_grad()
@@ -168,7 +148,6 @@ def main(config):
             
             if i % config["logging"]["log_interval"] == 0:
                 print(f"Epoch {epoch}, Iter {i}, Loss {loss.item()}")      
-                tb_writer.add_scalar("Loss", loss.item(), epoch * len(train_loader) + i)  
                 if use_wandb:
                     wandb.log({"Loss": loss.item(), "LR": scheduler.get_last_lr()})
                 
@@ -180,7 +159,7 @@ def main(config):
             print(f"Model is saved at {save_dir}")
         
         if (epoch + 1) % config["evaluation"]["eval_interval"] == 0:
-            current_auc = evaluate_inv(
+            metrics_dict = evaluate_inv(
                 model,
                 feature_extractor,
                 anom_loader,
@@ -190,21 +169,20 @@ def main(config):
                 epoch + 1,
                 config["evaluation"]["eval_step"],
                 device,
-            )["I-AUROC"]
+            )
+            current_mad = metrics_dict[config["data"]["category"]]["mAD"]
             
-            if current_auc > best_auc:
-                best_auc = current_auc
+            if current_mad > best_mad:
+                best_mad = current_mad
                 save_path = save_dir / f"model_best.pth"
                 torch.save(model.state_dict(), save_path)
                 print(f"Model is saved at {save_dir}")
 
             if use_wandb:
-                wandb.log({"AUC": current_auc})
-            print(f"AUC: {current_auc} at epoch {epoch}")
-            
+                wandb.log({"mAD": current_mad})
+            print(f"mAD: {current_mad} at epoch {epoch}")
             
     print("Training is done!")
-    tb_writer.close()
     
     # save model
     save_path = save_dir / "model_latest.pth"
@@ -216,7 +194,6 @@ def main(config):
 if __name__ == "__main__":
     args = parse_args()
     main(args)
-
 
     
     
@@ -232,13 +209,3 @@ if __name__ == "__main__":
             
             
             
-            
-            
-    
-    
-    
-    
-    
-    
-    
-    

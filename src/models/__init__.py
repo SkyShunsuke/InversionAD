@@ -1,14 +1,52 @@
 from .mlp import SimpleMLPAdaLN
-from .unet import UNetModel 
+from .unet import UNetModel
 from .dit import DiT, DiTMoE
 from .vae import AutoencoderKL
 
-# unet parameters
-tiny  = dict(model_channels=128, channel_mult=(1,2,2,4), num_res_blocks=1, attention_resolutions=(8,))
-base  = dict(model_channels=192, channel_mult=(1,2,3,4), num_res_blocks=2, attention_resolutions=(8,4))
-# large = dict(model_channels=256, channel_mult=(1,2,3,4,4), num_res_blocks=3, attention_resolutions=(16,8,4))
-large = dict(model_channels=512, channel_mult=(1,2,3,4,4), num_res_blocks=3, attention_resolutions=(16,8,4,2))
-xl    = dict(model_channels=320, channel_mult=(1,1,2,2,4,4), num_res_blocks=3, attention_resolutions=(16,8,4,2))
+def create_unet_model(latent_size=32, model_channels=256, num_res_blocks=2, num_heads=8, channel_mult=[1,2,4], context_dim=512, ncls=15):
+    model = UNetModel(image_size=latent_size, 
+                    in_channels=272,
+                    model_channels=model_channels, 
+                    out_channels=272, 
+                    num_heads=num_heads, 
+                    num_res_blocks=num_res_blocks, 
+                    dropout=0.,
+                    attention_resolutions=[2, 4, 8], 
+                    channel_mult = channel_mult,
+                    num_head_channels= model_channels//num_heads,
+                    use_spatial_transformer= False,
+                    ncls=ncls,
+                    transformer_depth= 2,
+                    context_dim=None,
+                )
+    return model
+
+def get_vae():
+    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema")
+    return vae
+    
+def UNET_XS(latent_size=32, ncls=15, **kwargs):
+    return  create_unet_model(latent_size=latent_size, model_channels=64, num_heads=4, channel_mult=[1,2,4], context_dim=128, ncls=ncls)
+
+def UNET_S(latent_size=32, ncls=15, **kwargs):
+    return  create_unet_model(latent_size=latent_size, model_channels=128, num_heads=4, channel_mult=[1,2,4], context_dim=256, ncls=ncls)
+
+def UNET_M(latent_size=32, ncls=15, **kwargs):
+    return  create_unet_model(latent_size=latent_size, model_channels=192, num_heads=6, channel_mult=[1,2,4], context_dim=384, ncls=ncls)
+
+def UNET_L(latent_size=32, ncls=15, **kwargs):
+    return  create_unet_model(latent_size=latent_size, model_channels=256, num_heads=8, channel_mult=[1,2,4], context_dim=512, ncls=ncls)
+
+def UNET_XL(latent_size=32, ncls=15, **kwargs):
+    return  create_unet_model(latent_size=latent_size, model_channels=320, num_heads=12, channel_mult=[1,2,4], context_dim=640, ncls=ncls)
+
+UNET_models = {
+'UNet_XS' : UNET_XS, 
+'UNet_S' : UNET_S, 
+'UNet_M' : UNET_M, 
+'UNet_L' : UNET_L, 
+'UNet_XL' : UNET_XL, 
+}
 
 def create_vae(
     model_type: str,
@@ -40,6 +78,7 @@ def create_denising_model(
     num_classes: int = 15,
     learn_sigma: bool = False,
     grad_checkpoint: bool = False, 
+    num_experts: int = 4,
     conditioning_scheme: str = 'none',
     pos_embed = None,
     channel_mult = (1, 1, 2, 2),
@@ -58,32 +97,14 @@ def create_denising_model(
             grad_checkpoint=grad_checkpoint
         )
     elif model_type == "unet":
-        # return UNetModel(
-        #     image_size=in_res,
-        #     in_channels=in_channels,
-        #     model_channels=model_channels,
-        #     out_channels=out_channels,
-        #     num_res_blocks=num_blocks,
-        #     attention_resolutions=attention_resolutions,
-        #     channel_mult=channel_mult,
-        #     num_classes=num_classes,
-        #     num_heads=num_heads,
-        #     num_heads_upsample=num_heads_upsample,
-        #     use_fp16=False,
-        # )
-        # use xl model
-        return UNetModel(
-            image_size=in_res,
-            in_channels=in_channels,
-            model_channels=large["model_channels"],
-            out_channels=out_channels,
-            num_res_blocks=large["num_res_blocks"],
-            attention_resolutions=large["attention_resolutions"],
-            channel_mult=large["channel_mult"],
-            num_classes=num_classes,
-            num_heads=num_heads,
-            num_heads_upsample=num_heads_upsample,
-            use_fp16=False,
+        return create_unet_model(
+            latent_size=16,
+            ncls=30,
+            model_channels=512,
+            num_heads=8,
+            num_res_blocks=2,
+            channel_mult=[1, 2, 3, 4],
+            context_dim=None,
         )
     elif model_type == "dit":
         return DiT(
@@ -111,6 +132,7 @@ def create_denising_model(
             num_heads=num_heads,
             mlp_ratio=mlp_ratio,
             class_dropout_prob=class_dropout_prob,
+            num_experts=num_experts,
             num_classes=num_classes,
             learn_sigma=learn_sigma,
             pos_embed=pos_embed

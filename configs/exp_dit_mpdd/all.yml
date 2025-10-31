@@ -11,7 +11,7 @@ diffusion:
   grad_checkpoint: false
   patch_size: 1
   channel_mult: [1,1,2,2]
-backbone: 
+backbone:
     model_type: efficientnet-b4
     outblocks:
       - 1
@@ -28,9 +28,9 @@ backbone:
 data:
   batch_size: 8
   category: all
-  data_root: data/mpdd
-  dataset_name: mpdd_all
-  img_size: 384
+  data_root: data/visa
+  dataset_name: visa_all
+  img_size: 256
   multi_category: false
   num_normal_samples: -1
   num_workers: 1
@@ -46,12 +46,12 @@ optimizer:
   optimizer_name: adamw
   scheduler_type: warmup_cosine
   warmup_epochs: 40
-  weight_decay: 0.0
+  weight_decay: 0
 logging:
   log_interval: 10
-  save_interval: 50
+  save_interval: 300
   save_images: false
-  save_dir: 'results/exp_dit_gigant_mpdd_enet384/all'
+  save_dir: 'results/exp_dit_gigant_visa/all'
 evaluation:
   eval_interval: 50
   eval_step: 3

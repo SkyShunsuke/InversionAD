@@ -152,22 +152,3 @@ class MPDD(Dataset):
             
             files = normal_img_files + anomalous_img_files
         return files
-
-if __name__ == "__main__":
-    data_root = "/home/haselab/projects/sakai_ssd/InversionAD/data/mpdd"
-    category = "bracket_black"
-    input_res = 224
-    split = "test"
-    transform = transforms.Compose([
-        transforms.Resize((input_res, input_res)),
-        transforms.ToTensor(),
-    ])
-    dataset = MPDD(data_root=data_root, category=category, input_res=input_res, split=split, transform=transform, is_mask=True)
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
-    for batch in dataloader:
-        print(batch["samples"].shape)  # Should print the shape of the images
-        print(batch["labels"])          # Should print the labels
-        if "masks" in batch:
-            print(batch["masks"].shape)  # Should print the shape of the masks if available
-        break
-    # Example usage of the MPDD dataset class

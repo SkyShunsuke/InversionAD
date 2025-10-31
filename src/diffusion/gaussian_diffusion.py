@@ -163,14 +163,6 @@ class GaussianDiffusion:
             extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t
             - extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * eps
         )
-    
-    # def _predict_eps_from_xstart(self, x_t: Tensor, t: Tensor, pred_xstart: Tensor) -> Tensor:
-    #     """Predict noise from x_t and x_0.
-    #     """
-    #     assert x_t.shape == pred_xstart.shape
-    #     return (
-    #         extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - pred_xstart
-    #     ) * extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
 
     def _predict_eps_from_xstart(self, x_t, t, pred_xstart):
         return (
@@ -459,7 +451,8 @@ class GaussianDiffusion:
 
         # Usually our model outputs epsilon, but we re-derive it
         # in case we used x_start or x_prev prediction.
-        eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+        # eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+        eps = out["eps"]
 
         alpha_bar = extract_into_tensor(self.alphas_cumprod, t, x.shape)
         alpha_bar_prev = extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
@@ -511,7 +504,6 @@ class GaussianDiffusion:
             extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x.shape) * x
             - out["pred_xstart"]
         ) / extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x.shape)
-        # eps = out["eps"]
         alpha_bar_next = extract_into_tensor(self.alphas_cumprod_next, t, x.shape)
 
         # Equation 12. reversed

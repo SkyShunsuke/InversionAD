@@ -1,7 +1,7 @@
 
 import os
 import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.append("/home/haselab/projects/sakai_ssd/InversionAD")
 import torch
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
@@ -21,7 +21,7 @@ import yaml
 from src.datasets import build_dataset
 from src.utils import get_optimizer, get_lr_scheduler
 from src.denoiser import get_denoiser, Denoiser
-from src.backbones import get_backbone
+from src.backbones import get_backbone, get_backbone_feature_shape
 
 from einops import rearrange
 from skimage import measure
@@ -32,11 +32,12 @@ from src.adeval.adeval import EvalAccumulatorCuda
 from torch.utils.data import ConcatDataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn import functional as F
+import matplotlib.pyplot as plt 
 
 from anomalib import metrics
 
 MAX_BATCH_SIZE = 64
-NUM_WORKERS = 1
+NUM_WORKERS = 4
 
 import logging
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -46,7 +47,6 @@ def extract_into_tensor(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="InversionAD Inference")
@@ -58,18 +58,22 @@ def parse_args():
     parser.add_argument('--use_ema_model', action='store_true', help='Use EMA model for evaluation')
     parser.add_argument('--use_best_model', action='store_true', help='Use best model for evaluation')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    parser.add_argument('--category', type=str, default=None, help='Category to evaluate on')
+    parser.add_argument('--visualize_samples', action='store_true', help='Visualize samples during evaluation')
     
     args = parser.parse_args()
     assert sum([args.use_best_model, args.use_ema_model]) < 2, "Please specify either --use_best_model or --use_ema_model"
     return args
 
+def denormalize(x):
+    imagenet_mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(1, 3, 1, 1)
+    imagenet_std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(1, 3, 1, 1)
+    x = x * imagenet_std + imagenet_mean
+    return x.clamp(0, 1)
+
 def postprocess(x):
     x = x / 2 + 0.5
     return x.clamp(0, 1)
-
-def postprocess_lpips(x):
-    # -> [-1, 1]
-    x = x * 2 - 1  # Assume x is in [0, 1]
 
 def convert2image(x):
     if x.dim() == 3:
@@ -118,77 +122,53 @@ def f1_max_gpu_hist(scores: torch.Tensor,
 
     return f1[best], thr
 
-@torch.no_grad()
-def extract_features(x, model):
-    b, c, h, w = x.shape
-    out = model.forward_features(x)  # (B, 197, d)
-    out = out[:, 1:]  # remove the first token
-    out = rearrange(out, 'b (h w) d -> b d h w', h=14, w=14)
-    return out
-
-def compute_pro(masks: ndarray, amaps: ndarray, num_th: int = 200) -> float:
-    """
-    Compute the area under the curve of per-region overlapping (PRO) and FPR from 0 to 0.3.
-
+def compute_pro(masks: ndarray, amaps: ndarray, num_th: int = 200) -> None:
+    """Compute the area under the curve of per-region overlaping (PRO) and 0 to 0.3 FPR
     Args:
-        masks (ndarray): Binary ground truth masks. Shape: (num_test_data, h, w)
-        amaps (ndarray): Anomaly maps. Shape: (num_test_data, h, w)
-        num_th (int, optional): Number of thresholds to evaluate.
-
-    Returns:
-        float: PRO AUC (area under the curve)
+        category (str): Category of product
+        masks (ndarray): All binary masks in test. masks.shape -> (num_test_data, h, w)
+        amaps (ndarray): All anomaly maps in test. amaps.shape -> (num_test_data, h, w)
+        num_th (int, optional): Number of thresholds
     """
 
-    # Validations
     assert isinstance(amaps, ndarray), "type(amaps) must be ndarray"
     assert isinstance(masks, ndarray), "type(masks) must be ndarray"
     assert amaps.ndim == 3, "amaps.ndim must be 3 (num_test_data, h, w)"
     assert masks.ndim == 3, "masks.ndim must be 3 (num_test_data, h, w)"
     assert amaps.shape == masks.shape, "amaps.shape and masks.shape must be same"
-    assert set(np.unique(masks)).issubset({0, 1}), "masks must contain only 0 and 1"
+    assert set(masks.flatten()) == {0, 1}, "set(masks.flatten()) must be {0, 1}"
     assert isinstance(num_th, int), "type(num_th) must be int"
+
+    df = pd.DataFrame([], columns=["pro", "fpr", "threshold"])
+    binary_amaps = np.zeros_like(amaps, dtype=bool)
 
     min_th = amaps.min()
     max_th = amaps.max()
     delta = (max_th - min_th) / num_th
 
-    records = []
-
     for th in np.arange(min_th, max_th, delta):
-        binary_amaps = (amaps > th).astype(np.uint8)
+        binary_amaps[amaps <= th] = 0
+        binary_amaps[amaps > th] = 1
 
         pros = []
         for binary_amap, mask in zip(binary_amaps, masks):
-            labeled_mask = measure.label(mask)
-            for region in measure.regionprops(labeled_mask):
-                coords = region.coords
-                tp_pixels = binary_amap[coords[:, 0], coords[:, 1]].sum()
+            for region in measure.regionprops(measure.label(mask)):
+                axes0_ids = region.coords[:, 0]
+                axes1_ids = region.coords[:, 1]
+                tp_pixels = binary_amap[axes0_ids, axes1_ids].sum()
                 pros.append(tp_pixels / region.area)
-
-        if len(pros) == 0:
-            continue  # Skip if there are no regions
 
         inverse_masks = 1 - masks
         fp_pixels = np.logical_and(inverse_masks, binary_amaps).sum()
-        denom = inverse_masks.sum()
-        fpr = fp_pixels / denom if denom != 0 else 0.0
+        fpr = fp_pixels / inverse_masks.sum()
 
-        records.append({
-            "pro": np.mean(pros),
-            "fpr": fpr,
-            "threshold": th
-        })
+        df = pd.concat([df, pd.DataFrame({"pro": [np.mean(pros)], "fpr": [fpr], "threshold": [th]})], ignore_index=True)
 
-    df = pd.DataFrame.from_records(records)
-
-    # Filter for FPR < 0.3 and normalize FPR to [0, 1]
+    # Normalize FPR from 0 ~ 1 to 0 ~ 0.3
     df = df[df["fpr"] < 0.3]
-    if df.empty or df["fpr"].max() == 0:
-        return 0.0  # No valid points for AUC
-
     df["fpr"] = df["fpr"] / df["fpr"].max()
-    pro_auc = auc(df["fpr"], df["pro"])
 
+    pro_auc = auc(df["fpr"], df["pro"])
     return pro_auc
 
 def main(config, args):
@@ -201,6 +181,11 @@ def main(config, args):
 
     dataset_config = config['data']
     device = config['meta']['device']
+    
+    if args.category is not None:
+        dataset_config['category'] = args.category
+        dataset_config['dataset_name'] = dataset_config['dataset_name'].split('_all')[0]  # Remove '_all' suffix if exists
+        logger.info(f"Evaluating on category: {args.category}")
     
     dataset_config['train'] = False
     dataset_config['normal_only'] = False
@@ -254,8 +239,7 @@ def main(config, args):
             )
         ]
     
-    # diff_in_sh = (272, 16, 16)  # For EfficientNet-b4
-    diff_in_sh = (272, 24, 24)  # For EfficientNet-b4 with 24x24 input
+    diff_in_sh = get_backbone_feature_shape(model_type=config['backbone']['model_type'])
     model: Denoiser = get_denoiser(**config['diffusion'], input_shape=diff_in_sh)
     model.to(device).eval()
 
@@ -274,14 +258,11 @@ def main(config, args):
             logger.warning(f"Best model checkpoint not found at {checkpoint_path}. Using latest model instead.")
             checkpoint_path = os.path.join(args.save_dir, 'model_latest.pth')
     else:
-        checkpoint_path = os.path.join(args.save_dir, 'model_latest.pth')
+        checkpoint_path = os.path.join(args.save_dir, 'model_latest_ep24.pth')
         
-    model_ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    if is_multi_class:
-        # for distributed training, the model state dict keys may have a prefix
-        # Remove the prefix if it exists
-        if 'module.' in list(model_ckpt.keys())[0]:
-            model_ckpt = {k.replace('module.', ''): v for k, v in model_ckpt.items()}
+    model_ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if 'module.' in list(model_ckpt.keys())[0]:
+        model_ckpt = {k.replace('module.', ''): v for k, v in model_ckpt.items()}
     model.load_state_dict(model_ckpt, strict=True)
     logger.info(f"Loaded model from {checkpoint_path}")
     
@@ -315,6 +296,7 @@ def main(config, args):
             "Eval",
             config["evaluation"]["eval_step"] if args.eval_step == -1 else args.eval_step,
             device,
+            args
         )
             
     logger.info(f"{metrics_dict}")
@@ -473,16 +455,20 @@ def evaluate_recon(denoiser, feature_extractor, anom_loaders, normal_loaders, co
     return roc_dict
 
 @torch.no_grad()
-def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, config, in_sh, epoch, eval_step, device):
+def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, config, in_sh, epoch, eval_step, device, args):
     denoiser.eval()
     feature_extractor.eval()
     
     eval_denoiser = init_denoiser(eval_step, device, config, in_sh, inherit_model=denoiser)
     metrics_dict = {}
     for normal_loader, anom_loader in zip(normal_loaders, anom_loaders):
+        
+        samples_dict = {}
         category = anom_loader.dataset.category if hasattr(anom_loader.dataset, 'category') else 'unknown'
         if category not in metrics_dict:
             metrics_dict[category] = {}
+        if category not in samples_dict:
+            samples_dict[category] = {}
         logger.info(f"[{category}] Evaluating on {len(anom_loader.dataset)} anomalous samples and {len(normal_loader.dataset)} normal samples")
         logger.info(f"[{category}] Evaluation step: {eval_step}")
         logger.info(f"[{category}] Epoch: {epoch}")
@@ -500,13 +486,13 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
             
             images = batch["samples"].to(device)
             org_h, org_w = images.shape[2], images.shape[3]
+            paths = batch["filenames"]
             labels = batch["clslabels"].to(device)
+            anom_labels = batch["labels"]
             normal_gt_masks.append(batch["masks"])
             
             s_time = time.perf_counter()
-            features, features_list = feature_extractor(images)
-            loss = denoiser(features, labels)
-            losses.append(loss.cpu().numpy())
+            features, _ = feature_extractor(images)
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 latents_last = eval_denoiser.ddim_reverse_sample(
                     features, start_t, labels, eta=0.0
@@ -529,30 +515,41 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
                 torch.cuda.max_memory_allocated() / (1024 * 1024), n=latents_last.shape[0]
             )
             
-        # logger.info(f"[{category}] Average time per sample: {time_meter.avg*1000:.4f} [ms]")
+            # Save the samples for visualization
+            org_imgs = images.cpu()
+            org_imgs = denormalize(org_imgs)
+            org_imgs = convert2image(org_imgs)
+            normal_map = normal_map.cpu().numpy()
+            for i in range(len(org_imgs)):
+                samples_dict[f"{category}"].update({
+                    f"{paths[i]}": {
+                        "image": org_imgs[i],
+                        "anomaly_map": normal_map[i],
+                        "gt_mask": batch["masks"][i].cpu().numpy()
+                    }
+                })
+                if anom_labels[i] == 1:
+                    logger.info(f"Found anomalous sample: {paths[i]}")
+            
         anomaly_ats = []
         anomaly_nlls = []
         anomaly_maps = []
         anomaly_gt_masks = []
-        # time_meter = AverageMeter()
         
-        c = 0
         for batch in tqdm(anom_loader, total=len(anom_loader)):
             images = batch["samples"].to(device)
             labels = batch["clslabels"].to(device)
             anomaly_gt_masks.append(batch["masks"])
+            anom_labels = batch["labels"]
             
             torch.cuda.synchronize()
             s_time = time.perf_counter()
-            features, features_list = feature_extractor(images)
-            loss = denoiser(features, labels)
-            losses.append(loss.cpu().numpy())
+            features, _ = feature_extractor(images)
             
             with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
                 latents_last = eval_denoiser.ddim_reverse_sample(
                     features, start_t, labels, eta=0.0
                 )
-            
             latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
             ats = torch.abs(latents_last_l2 - torch.sqrt(torch.tensor([0], device=device, dtype=torch.float32))) 
             min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]
@@ -571,9 +568,26 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
             memory_meter.update(
                 torch.cuda.max_memory_allocated() / (1024 * 1024), n=latents_last.shape[0]
             )
+            
+            # Save the samples for visualization
+            org_imgs = images.cpu()
+            org_imgs = denormalize(org_imgs)
+            org_imgs = convert2image(org_imgs)
+            anomaly_map = anomaly_map.cpu().numpy()
+            paths = batch["filenames"]
+            for i in range(len(org_imgs)):
+                samples_dict[f"{category}"].update({
+                    f"{paths[i]}": {
+                        "image": org_imgs[i],
+                        "anomaly_map": anomaly_map[i],
+                        "gt_mask": batch["masks"][i].cpu().numpy()
+                    }
+                })
+                
+                if anom_labels[i] == 0:
+                    logger.info(f"Found normal sample: {paths[i]}")
+            
         
-        losses = np.array(losses)
-        logger.info(f"[{category}] Loss: {losses.mean()} at epoch {epoch}")
         logger.info(f"[{category}] Average time per sample: {time_meter.avg*1000:.4f} [ms]")
         logger.info(f"[{category}] Average memory usage: {memory_meter.avg:.2f} [MB]")
         metrics_dict[category]["latency"] = time_meter.avg * 1000  # Convert to milliseconds
@@ -599,17 +613,14 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         anomaly_nlls = (anomaly_nlls - nlls_min) / (nlls_max - nlls_min + eps)
 
         # Calculate Metrics for image-level
-        s_time = time.perf_counter()
         y_true = np.concatenate([np.zeros(len(normal_ats)), np.ones(len(anomaly_ats))])
         normal_scores = normal_ats + normal_nlls
         anomaly_scores = anomaly_ats + anomaly_nlls
         y_score = np.concatenate([normal_scores, anomaly_scores])
         roc_auc = roc_auc_score(y_true, y_score)
         ap = average_precision_score(y_true, y_score)
-        f1max_score, best_thr_px = f1_max_gpu_hist(torch.from_numpy(y_score).to(device), torch.from_numpy(y_true).bool().to(device), n_bins=501)
+        f1max_score, _ = f1_max_gpu_hist(torch.from_numpy(y_score).to(device), torch.from_numpy(y_true).bool().to(device), n_bins=1000)
         f1max_score = f1max_score.item() if isinstance(f1max_score, torch.Tensor) else f1max_score
-        e_time = time.perf_counter()
-        logger.info(f"[{category}] Image-level metrics computation time: {e_time - s_time:.4f} seconds")
         
         metrics_dict[category]["I-AUROC"] = roc_auc
         metrics_dict[category]["I-AP"] = ap
@@ -624,12 +635,12 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
             normal_gt_masks.cpu().squeeze(1).numpy(),
             anomaly_gt_masks.cpu().squeeze(1).numpy()
         ])
-        y_true_map = np.where(y_true_map > 0.5, 1, 0)  # Convert masks to binary
+        y_true_map = np.where(y_true_map > 0., 1, 0)  # Convert masks to binary
         y_score_map = np.concatenate([
             normal_maps, 
             anomaly_maps
         ])
-        y_true_px = np.where(y_true_px > 0.5, 1, 0)  # Convert masks to binary
+        y_true_px = np.where(y_true_px > 0., 1, 0)  # Convert masks to binary
         y_score_px = np.concatenate([
             normal_maps.flatten(),
             anomaly_maps.flatten()
@@ -639,7 +650,6 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         anomap_min, anomap_max = y_score_map.min(), y_score_map.max()
         accum = EvalAccumulatorCuda(score_min, score_max, anomap_min, anomap_max)
         
-        s_time = time.perf_counter()
         accum_batch_size = 2048
         num_batches = len(y_true_px) // accum_batch_size + (1 if len(y_true_px) % accum_batch_size > 0 else 0)
         logger.info(f"[{category}] Number of batches for pixel-level evaluation: {num_batches}")
@@ -655,35 +665,12 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
             
         ad_metrics = accum.summary()
         
-        e_time = time.perf_counter()
-        logger.info(f"[{category}] Pixel-level metrics computation time: {e_time - s_time:.4f} seconds")
         roc_auc_px = ad_metrics["p_auroc"]
         pro = ad_metrics["p_aupro"]
-        
-        # s_time = time.perf_counter()
-        # roc_auc_px = roc_auc_score(y_true_px, y_score_px)
-        # e_time = time.perf_counter()
-        # logger.info(f"[{category}] Pixel AUC computation time: {e_time - s_time:.4f} seconds")
-        
-        s_time = time.perf_counter()
         ap_px = average_precision_score(y_true_px, y_score_px)
-        e_time = time.perf_counter()
-        logger.info(f"[{category}] Pixel AP computation time: {e_time - s_time:.4f} seconds")
-
-        # s_time = time.perf_counter()
-        # pro = compute_pro(y_true_map, y_score_map)
-        # e_time = time.perf_counter()
-        # logger.info(f"[{category}] PRO computation time: {e_time - s_time:.4f} seconds")
         
-        s_time = time.perf_counter()
-        e_time = time.perf_counter()
-        logger.info(f"[{category}] Pixel F1Max computation time: {e_time - s_time:.4f} seconds")
-        
-        s_time = time.perf_counter()
-        f1max_px_score, best_thr_px = f1_max_gpu_hist(torch.from_numpy(y_score_px).to(device), torch.from_numpy(y_true_px).bool().to(device), n_bins=501)
+        f1max_px_score, _ = f1_max_gpu_hist(torch.from_numpy(y_score_px).to(device), torch.from_numpy(y_true_px).bool().to(device), n_bins=1000)
         f1max_px_score = f1max_px_score.item() if isinstance(f1max_px_score, torch.Tensor) else f1max_px_score
-        e_time = time.perf_counter()
-        logger.info(f"[{category}] Pixel F1Max score computation time: {e_time - s_time:.4f} seconds")
         
         metrics_dict[category]["P-AUROC"] = roc_auc_px
         metrics_dict[category]["P-AP"] = ap_px
@@ -699,439 +686,49 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
         logger.info(f"[{category}] PRO: {pro} at epoch {epoch}")
         logger.info(f"[{category}] Image F1Max: {f1max_score} at epoch {epoch}")
         logger.info(f"[{category}] Pixel F1Max: {f1max_px_score} at epoch {epoch}")
+        logger.info(f"[{category}] mAD: {mad} at epoch {epoch}")    
         
         torch.cuda.empty_cache()
-    logger.info(f"Evaluation completed for all categories.")
-    return metrics_dict
-
-@torch.no_grad()
-def evaluate_odm(denoiser, feature_extractor, anom_loaders, normal_loaders, config, in_sh, epoch, eval_step, device):
-    denoiser.eval()
-    feature_extractor.eval()
-    
-    metrics_dict = {}
-    for normal_loader, anom_loader in zip(normal_loaders, anom_loaders):
-        category = anom_loader.dataset.category if hasattr(anom_loader.dataset, 'category') else 'unknown'
-        if category not in metrics_dict:
-            metrics_dict[category] = {}
-        logger.info(f"[{category}] Evaluating on {len(anom_loader.dataset)} anomalous samples and {len(normal_loader.dataset)} normal samples")
-        logger.info(f"[{category}] Epoch: {epoch}")
-    
-        normal_ats = []
-        normal_nlls = []
-        normal_maps = []
-        normal_gt_masks = []
-        time_meter = AverageMeter()
-        memory_meter = AverageMeter()
-        c = 0
-        for batch in tqdm(normal_loader, total=len(normal_loader)):
-            
-            images = batch["samples"].to(device)
-            org_h, org_w = images.shape[2], images.shape[3]
-            labels = batch["clslabels"].to(device)
-            normal_gt_masks.append(batch["masks"])
-            
-            s_time = time.perf_counter()
-            z, _ = feature_extractor(images)
-            t = torch.tensor([0] * z.shape[0], device=device, dtype=torch.long)
-            model_kwargs = dict(c=labels)
-            
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                latents_last = denoiser.net(z, t)
-            latents_last = latents_last.float()
-            latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
-            ats = torch.abs(latents_last_l2 - torch.sqrt(torch.tensor([0], device=device, dtype=torch.float32))) 
-            min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]  # (bs, )
-            max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]  # (bs, )
-            ats = torch.abs(min_ats_spatial - max_ats_spatial)  # (bs, )
-            nll = calculate_log_pdf(latents_last.cpu()) * -1
-            e_time = time.perf_counter()
-            time_meter.update(e_time - s_time, n=1)
-
-            normal_map = F.interpolate(latents_last_l2.unsqueeze(0), size=(org_h, org_w), mode='bilinear', align_corners=False).squeeze(0)
-            normal_maps.append(normal_map.cpu().numpy())
-            normal_nlls.extend(nll.cpu().numpy())
-            normal_ats.extend(ats.cpu().numpy())
-            
-            memory_meter.update(
-                torch.cuda.max_memory_allocated() / (1024 * 1024), n=latents_last.shape[0]
-            )
-            
-        # logger.info(f"[{category}] Average time per sample: {time_meter.avg*1000:.4f} [ms]")
-        anomaly_ats = []
-        anomaly_nlls = []
-        anomaly_maps = []
-        anomaly_gt_masks = []
-        # time_meter = AverageMeter()
         
-        c = 0
-        for batch in tqdm(anom_loader, total=len(anom_loader)):
-            images = batch["samples"].to(device)
-            labels = batch["clslabels"].to(device)
-            anomaly_gt_masks.append(batch["masks"])
-            
-            torch.cuda.synchronize()
-            s_time = time.perf_counter()
-            z, _ = feature_extractor(images)
-            
-            model_kwargs = dict(c=labels)
-            t = torch.tensor([0] * z.shape[0], device=device, dtype=torch.long)
-            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                latents_last = denoiser.net(z, t)
-            latents_last = latents_last.float()
-            
-            latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
-            ats = torch.abs(latents_last_l2 - torch.sqrt(torch.tensor([0], device=device, dtype=torch.float32))) 
-            min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]
-            max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]
-            ats = torch.abs(min_ats_spatial - max_ats_spatial)
-            nll = calculate_log_pdf(latents_last.cpu()) * -1
-            e_time = time.perf_counter()
-            
-            time_meter.update(e_time - s_time, n=1)
-    
-            anomaly_map = F.interpolate(latents_last_l2.unsqueeze(0), size=(org_h, org_w), mode='bilinear', align_corners=False).squeeze(0)
-            anomaly_maps.append(anomaly_map.cpu().numpy())
-            anomaly_nlls.extend(nll.cpu().numpy())
-            anomaly_ats.extend(ats.cpu().numpy())
-            
-            memory_meter.update(
-                torch.cuda.max_memory_allocated() / (1024 * 1024), n=latents_last.shape[0]
-            )
-        
-        logger.info(f"[{category}] Average time per sample: {time_meter.avg*1000:.4f} [ms]")
-        logger.info(f"[{category}] Average memory usage: {memory_meter.avg:.2f} [MB]")
-        metrics_dict[category]["latency"] = time_meter.avg * 1000  # Convert to milliseconds
-        metrics_dict[category]["memory"] = memory_meter.avg  # in MB
-        
-        normal_ats = np.array(normal_ats)
-        anomaly_ats = np.array(anomaly_ats)
-        normal_nlls = np.array(normal_nlls)
-        anomaly_nlls = np.array(anomaly_nlls)
-        normal_maps = np.concatenate(normal_maps, axis=0)
-        anomaly_maps = np.concatenate(anomaly_maps, axis=0)
-        normal_gt_masks = torch.cat(normal_gt_masks, dim=0)
-        anomaly_gt_masks = torch.cat(anomaly_gt_masks, dim=0)
-
-        ats_min = np.min([normal_ats.min(), anomaly_ats.min()])
-        ats_max = np.max([normal_ats.max(), anomaly_ats.max()])
-        nlls_min = np.min([normal_nlls.min(), anomaly_nlls.min()])
-        nlls_max = np.max([normal_nlls.max(), anomaly_nlls.max()])
-        eps = 1e-8  # Small constant to avoid division by zero
-        normal_ats = (normal_ats - ats_min) / (ats_max - ats_min + eps) 
-        anomaly_ats = (anomaly_ats - ats_min) / (ats_max - ats_min + eps) 
-        normal_nlls = (normal_nlls - nlls_min) / (nlls_max - nlls_min + eps)
-        anomaly_nlls = (anomaly_nlls - nlls_min) / (nlls_max - nlls_min + eps)
-
-        # Calculate Metrics for image-level
-        s_time = time.perf_counter()
-        y_true = np.concatenate([np.zeros(len(normal_ats)), np.ones(len(anomaly_ats))])
-        normal_scores = normal_ats + normal_nlls
-        anomaly_scores = anomaly_ats + anomaly_nlls
-        y_score = np.concatenate([normal_scores, anomaly_scores])
-        roc_auc = roc_auc_score(y_true, y_score)
-        ap = average_precision_score(y_true, y_score)
-        f1max_score, best_thr = f1_max_gpu_hist(torch.from_numpy(y_score).to(device), torch.from_numpy(y_true).bool().to(device), n_bins=501)
-        f1max_score = f1max_score.item() if isinstance(f1max_score, torch.Tensor) else f1max_score
-        
-        metrics_dict[category]["I-AUROC"] = roc_auc
-        metrics_dict[category]["I-AP"] = ap
-        metrics_dict[category]["I-F1Max"] = f1max_score
-        logger.info(f"[{category}] Image-level metrics: AUC: {roc_auc}, AP: {ap}, F1Max: {f1max_score} at epoch {epoch}")
-        
-        # Calculate Metics for pixel-level
-        y_true_px = np.concatenate([
-            normal_gt_masks.cpu().numpy().flatten(),
-            anomaly_gt_masks.cpu().numpy().flatten()
-        ])
-        y_true_map = np.concatenate([
-            normal_gt_masks.cpu().squeeze(1).numpy(),
-            anomaly_gt_masks.cpu().squeeze(1).numpy()
-        ])
-        y_true_map = np.where(y_true_map > 0.5, 1, 0)  # Convert masks to binary
-        y_score_map = np.concatenate([
-            normal_maps, 
-            anomaly_maps
-        ])
-        y_true_px = np.where(y_true_px > 0.5, 1, 0)  # Convert masks to binary
-        y_score_px = np.concatenate([
-            normal_maps.flatten(),
-            anomaly_maps.flatten()
-        ])
-        
-        score_min, score_max = y_score.min(), y_score.max()
-        anomap_min, anomap_max = y_score_map.min(), y_score_map.max()
-        accum = EvalAccumulatorCuda(score_min, score_max, anomap_min, anomap_max)
-        
-        s_time = time.perf_counter()
-        accum_batch_size = 2048
-        num_batches = len(y_true_px) // accum_batch_size + (1 if len(y_true_px) % accum_batch_size > 0 else 0)
-        logger.info(f"[{category}] Number of batches for pixel-level evaluation: {num_batches}")
-        for i in range(0, len(y_true_px), accum_batch_size):
-            end_idx = min(i + accum_batch_size, len(y_true_px))
-            batch_y_true_map = torch.from_numpy(y_true_map[i:end_idx]).to(device)
-            batch_y_score_map = torch.from_numpy(y_score_map[i:end_idx]).to(device)
-            batcy_y_score = torch.from_numpy(y_score[i:end_idx]).to(device)
-            batch_y_true = torch.from_numpy(y_true[i:end_idx]).to(device)
-            
-            accum.add_anomap_batch(batch_y_score_map, batch_y_true_map)
-            accum.add_image(batcy_y_score, batch_y_true)
-            
-        ad_metrics = accum.summary()
-        
-        e_time = time.perf_counter()
-        logger.info(f"[{category}] Pixel-level metrics computation time: {e_time - s_time:.4f} seconds")
-        roc_auc_px = ad_metrics["p_auroc"]
-        pro = ad_metrics["p_aupro"]        # s_time = time.perf_counter()
-        ap_px = average_precision_score(y_true_px, y_score_px)
-        f1max_px_score, best_thr_px = f1_max_gpu_hist(torch.from_numpy(y_score_px).to(device), torch.from_numpy(y_true_px).bool().to(device), n_bins=501)
-        f1max_px_score = f1max_px_score.item() if isinstance(f1max_px_score, torch.Tensor) else f1max_px_score
-        
-        metrics_dict[category]["P-AUROC"] = roc_auc_px
-        metrics_dict[category]["P-AP"] = ap_px
-        metrics_dict[category]["PRO"] = pro
-        metrics_dict[category]["P-F1Max"] = f1max_px_score
-        
-        logger.info(f"[{category}] Pixel-level metrics: AUC: {roc_auc_px}, AP: {ap_px}, PRO: {pro}, F1Max: {f1max_px_score} at epoch {epoch}")
-        mad = np.mean([roc_auc, roc_auc_px, ap, ap_px, pro, f1max_score, f1max_px_score])
-        # metrics_dict[category]["mAD"] = mad
-        metrics_dict["mAD"] = mad
-        logger.info(f"[{category}] mAD: {mad} at epoch {epoch}")
+        if args.visualize_samples:
+            logger.info(f"[{category}] Visualizing samples and anomaly maps")
+            map_min, map_max = np.min(y_score_map), np.max(y_score_map)
+            logger.info(f"[{category}] Anomaly map min: {map_min}, max: {map_max}")
+            # Save the samples
+            save_dir = os.path.join('samples', category)
+            os.makedirs(save_dir, exist_ok=True)
+            for path in tqdm(samples_dict[category]):
+                sample = samples_dict[category][path]
+                image = sample["image"]
+                anomaly_map = sample["anomaly_map"]
+                # Save the image and anomaly map
+                fig, ax = plt.subplots(1, 3, figsize=(12, 6))
+                ax[0].imshow(image)
+                ax[0].set_title("Original Image")
+                ax[0].axis('off')
+                ax[1].imshow(anomaly_map, cmap='viridis', interpolation='nearest', vmin=map_min, vmax=map_max)
+                ax[1].set_title("Anomaly Map")
+                ax[1].axis('off')
+                ax[2].imshow(sample["gt_mask"], cmap='gray', interpolation='nearest')
+                ax[2].set_title("Ground Truth Mask")
+                ax[2].axis('off')
+                
+                plt.tight_layout()
+                filename = path.split(".png")[0].replace("/", "_")
+                save_path = os.path.join(save_dir, f"{filename}.png")
+                plt.savefig(save_path)
+                plt.close(fig)
+            logger.info(f"Saved sample images and anomaly maps to {save_dir}")
         
     logger.info(f"Evaluation completed for all categories.")
     return metrics_dict
-
-@torch.no_grad()
-def evaluate_cm(denoiser, feature_extractor, anom_loaders, normal_loaders, config, in_sh, epoch, eval_step, device):
-    denoiser.eval()
-    feature_extractor.eval()
-    
-    metrics_dict = {}
-    for normal_loader, anom_loader in zip(normal_loaders, anom_loaders):
-        category = anom_loader.dataset.category if hasattr(anom_loader.dataset, 'category') else 'unknown'
-        if category not in metrics_dict:
-            metrics_dict[category] = {}
-        logger.info(f"[{category}] Evaluating on {len(anom_loader.dataset)} anomalous samples and {len(normal_loader.dataset)} normal samples")
-        logger.info(f"[{category}] Epoch: {epoch}")
-    
-        normal_ats = []
-        normal_nlls = []
-        normal_maps = []
-        normal_gt_masks = []
-        time_meter = AverageMeter()
-        memory_meter = AverageMeter()
-        c = 0
-        
-        alpha_schedule = torch.sqrt(torch.from_numpy(denoiser.train_diffusion.alphas_cumprod)).to(device)
-        sigma_schedule = torch.sqrt(1 - torch.from_numpy(denoiser.train_diffusion.alphas_cumprod)).to(device)
-        for batch in tqdm(normal_loader, total=len(normal_loader)):
-            
-            images = batch["samples"].to(device)
-            org_h, org_w = images.shape[2], images.shape[3]
-            labels = batch["clslabels"].to(device)
-            normal_gt_masks.append(batch["masks"])
-            
-            s_time = time.perf_counter()
-            z, _ = feature_extractor(images)
-            # t = torch.tensor([0] * z.shape[0], device=device, dtype=torch.long)
-            model_kwargs = dict(c=labels)
-            
-            # Slightly diffuse
-            start_t = 19
-            start_t = torch.tensor([start_t] * z.shape[0], device=device, dtype=torch.long)
-            z = denoiser.q_sample(z, start_t).float()
-            
-            # with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            noise_pred = denoiser.net(z, start_t)
-            latents_last = predicted_last(
-                noise_pred,
-                start_t,
-                z,
-                "epsilon",
-                alpha_schedule,
-                sigma_schedule
-            ).float()
-            latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
-            ats = torch.abs(latents_last_l2 - torch.sqrt(torch.tensor([0], device=device, dtype=torch.float32))) 
-            min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]  # (bs, )
-            max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]  # (bs, )
-            ats = torch.abs(min_ats_spatial - max_ats_spatial)  # (bs, )
-            nll = calculate_log_pdf(latents_last.cpu()) * -1
-            e_time = time.perf_counter()
-            time_meter.update(e_time - s_time, n=1)
-
-            normal_map = F.interpolate(latents_last_l2.unsqueeze(0), size=(org_h, org_w), mode='bilinear', align_corners=False).squeeze(0)
-            normal_maps.append(normal_map.cpu().numpy())
-            normal_nlls.extend(nll.cpu().numpy())
-            normal_ats.extend(ats.cpu().numpy())
-            
-            memory_meter.update(
-                torch.cuda.max_memory_allocated() / (1024 * 1024), n=latents_last.shape[0]
-            )
-            
-        # logger.info(f"[{category}] Average time per sample: {time_meter.avg*1000:.4f} [ms]")
-        anomaly_ats = []
-        anomaly_nlls = []
-        anomaly_maps = []
-        anomaly_gt_masks = []
-        # time_meter = AverageMeter()
-        
-        c = 0
-        for batch in tqdm(anom_loader, total=len(anom_loader)):
-            images = batch["samples"].to(device)
-            labels = batch["clslabels"].to(device)
-            anomaly_gt_masks.append(batch["masks"])
-            
-            torch.cuda.synchronize()
-            s_time = time.perf_counter()
-            z, _ = feature_extractor(images)
-            
-            model_kwargs = dict(c=labels)
-            
-            # Slightly diffuse
-            start_t = 19
-            start_t = torch.tensor([start_t] * z.shape[0], device=device, dtype=torch.long)
-            z = denoiser.q_sample(z, start_t).float()
-            
-            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                noise_pred = denoiser.net(z, start_t)
-            latents_last = predicted_last(
-                noise_pred,
-                start_t,
-                z,
-                "epsilon",
-                alpha_schedule,
-                sigma_schedule
-            ).float()
-            
-            latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
-            ats = torch.abs(latents_last_l2 - torch.sqrt(torch.tensor([0], device=device, dtype=torch.float32))) 
-            min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]
-            max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]
-            ats = torch.abs(min_ats_spatial - max_ats_spatial)
-            nll = calculate_log_pdf(latents_last.cpu()) * -1
-            e_time = time.perf_counter()
-            
-            time_meter.update(e_time - s_time, n=1)
-    
-            anomaly_map = F.interpolate(latents_last_l2.unsqueeze(0), size=(org_h, org_w), mode='bilinear', align_corners=False).squeeze(0)
-            anomaly_maps.append(anomaly_map.cpu().numpy())
-            anomaly_nlls.extend(nll.cpu().numpy())
-            anomaly_ats.extend(ats.cpu().numpy())
-            
-            memory_meter.update(
-                torch.cuda.max_memory_allocated() / (1024 * 1024), n=latents_last.shape[0]
-            )
-        
-        logger.info(f"[{category}] Average time per sample: {time_meter.avg*1000:.4f} [ms]")
-        logger.info(f"[{category}] Average memory usage: {memory_meter.avg:.2f} [MB]")
-        metrics_dict[category]["latency"] = time_meter.avg * 1000  # Convert to milliseconds
-        metrics_dict[category]["memory"] = memory_meter.avg  # in MB
-        
-        normal_ats = np.array(normal_ats)
-        anomaly_ats = np.array(anomaly_ats)
-        normal_nlls = np.array(normal_nlls)
-        anomaly_nlls = np.array(anomaly_nlls)
-        normal_maps = np.concatenate(normal_maps, axis=0)
-        anomaly_maps = np.concatenate(anomaly_maps, axis=0)
-        normal_gt_masks = torch.cat(normal_gt_masks, dim=0)
-        anomaly_gt_masks = torch.cat(anomaly_gt_masks, dim=0)
-
-        ats_min = np.min([normal_ats.min(), anomaly_ats.min()])
-        ats_max = np.max([normal_ats.max(), anomaly_ats.max()])
-        nlls_min = np.min([normal_nlls.min(), anomaly_nlls.min()])
-        nlls_max = np.max([normal_nlls.max(), anomaly_nlls.max()])
-        eps = 1e-8  # Small constant to avoid division by zero
-        normal_ats = (normal_ats - ats_min) / (ats_max - ats_min + eps) 
-        anomaly_ats = (anomaly_ats - ats_min) / (ats_max - ats_min + eps) 
-        normal_nlls = (normal_nlls - nlls_min) / (nlls_max - nlls_min + eps)
-        anomaly_nlls = (anomaly_nlls - nlls_min) / (nlls_max - nlls_min + eps)
-
-        # Calculate Metrics for image-level
-        s_time = time.perf_counter()
-        y_true = np.concatenate([np.zeros(len(normal_ats)), np.ones(len(anomaly_ats))])
-        normal_scores = normal_ats + normal_nlls
-        anomaly_scores = anomaly_ats + anomaly_nlls
-        y_score = np.concatenate([normal_scores, anomaly_scores])
-        roc_auc = roc_auc_score(y_true, y_score)
-        ap = average_precision_score(y_true, y_score)
-        f1max_score, best_thr = f1_max_gpu_hist(torch.from_numpy(y_score).to(device), torch.from_numpy(y_true).bool().to(device), n_bins=501)
-        f1max_score = f1max_score.item() if isinstance(f1max_score, torch.Tensor) else f1max_score
-        
-        metrics_dict[category]["I-AUROC"] = roc_auc
-        metrics_dict[category]["I-AP"] = ap
-        metrics_dict[category]["I-F1Max"] = f1max_score
-        logger.info(f"[{category}] Image-level metrics: AUC: {roc_auc}, AP: {ap}, F1Max: {f1max_score} at epoch {epoch}")
-        
-        # Calculate Metics for pixel-level
-        y_true_px = np.concatenate([
-            normal_gt_masks.cpu().numpy().flatten(),
-            anomaly_gt_masks.cpu().numpy().flatten()
-        ])
-        y_true_map = np.concatenate([
-            normal_gt_masks.cpu().squeeze(1).numpy(),
-            anomaly_gt_masks.cpu().squeeze(1).numpy()
-        ])
-        y_true_map = np.where(y_true_map > 0.5, 1, 0)  # Convert masks to binary
-        y_score_map = np.concatenate([
-            normal_maps, 
-            anomaly_maps
-        ])
-        y_true_px = np.where(y_true_px > 0.5, 1, 0)  # Convert masks to binary
-        y_score_px = np.concatenate([
-            normal_maps.flatten(),
-            anomaly_maps.flatten()
-        ])
-        
-        score_min, score_max = y_score.min(), y_score.max()
-        anomap_min, anomap_max = y_score_map.min(), y_score_map.max()
-        accum = EvalAccumulatorCuda(score_min, score_max, anomap_min, anomap_max)
-        
-        s_time = time.perf_counter()
-        accum_batch_size = 2048
-        num_batches = len(y_true_px) // accum_batch_size + (1 if len(y_true_px) % accum_batch_size > 0 else 0)
-        logger.info(f"[{category}] Number of batches for pixel-level evaluation: {num_batches}")
-        for i in range(0, len(y_true_px), accum_batch_size):
-            end_idx = min(i + accum_batch_size, len(y_true_px))
-            batch_y_true_map = torch.from_numpy(y_true_map[i:end_idx]).to(device)
-            batch_y_score_map = torch.from_numpy(y_score_map[i:end_idx]).to(device)
-            batcy_y_score = torch.from_numpy(y_score[i:end_idx]).to(device)
-            batch_y_true = torch.from_numpy(y_true[i:end_idx]).to(device)
-            
-            accum.add_anomap_batch(batch_y_score_map, batch_y_true_map)
-            accum.add_image(batcy_y_score, batch_y_true)
-            
-        ad_metrics = accum.summary()
-        
-        e_time = time.perf_counter()
-        logger.info(f"[{category}] Pixel-level metrics computation time: {e_time - s_time:.4f} seconds")
-        roc_auc_px = ad_metrics["p_auroc"]
-        pro = ad_metrics["p_aupro"]        # s_time = time.perf_counter()
-        ap_px = average_precision_score(y_true_px, y_score_px)
-        f1max_px_score, best_thr_px = f1_max_gpu_hist(torch.from_numpy(y_score_px).to(device), torch.from_numpy(y_true_px).bool().to(device), n_bins=501)
-        f1max_px_score = f1max_px_score.item() if isinstance(f1max_px_score, torch.Tensor) else f1max_px_score
-        
-        metrics_dict[category]["P-AUROC"] = roc_auc_px
-        metrics_dict[category]["P-AP"] = ap_px
-        metrics_dict[category]["PRO"] = pro
-        metrics_dict[category]["P-F1Max"] = f1max_px_score
-        
-        logger.info(f"[{category}] Pixel-level metrics: AUC: {roc_auc_px}, AP: {ap_px}, PRO: {pro}, F1Max: {f1max_px_score} at epoch {epoch}")
-        mad = np.mean([roc_auc, roc_auc_px, ap, ap_px, pro, f1max_score, f1max_px_score])
-        # metrics_dict[category]["mAD"] = mad
-        metrics_dict["mAD"] = mad
-        logger.info(f"[{category}] mAD: {mad} at epoch {epoch}")
-        
-    logger.info(f"Evaluation completed for all categories.")
-    return metrics_dict
-
 
 import torch.distributed as dist
 @torch.no_grad()
 def concat_all_gather(array, world_size):
     world_size = dist.get_world_size()
     gather_list = [None] * world_size
-    dist.all_gather_object(gather_list, array)  # CPU 配列をそのまま gather
+    dist.all_gather_object(gather_list, array)  # Gather the arrays from all processes
     return np.concatenate(gather_list, axis=0)
 
 @torch.no_grad()
@@ -1157,7 +754,7 @@ def evaluate_dist(denoiser, feature_extractor, anom_loader, normal_loader, confi
         labels = batch["clslabels"].to(device)
         normal_gt_masks.append(batch["masks"])
         
-        features, features_list = feature_extractor(images)
+        features, _ = feature_extractor(images)
         loss = denoiser(features, labels)
         losses.append(loss.cpu().numpy())
         
@@ -1187,7 +784,7 @@ def evaluate_dist(denoiser, feature_extractor, anom_loader, normal_loader, confi
         labels = batch["clslabels"].to(device)
         anomaly_gt_masks.append(batch["masks"])
         
-        features, features_list = feature_extractor(images)
+        features, _ = feature_extractor(images)
         loss = denoiser(features, labels)
         losses.append(loss.cpu().numpy())
         latents_last = eval_denoiser.ddim_reverse_sample(
@@ -1255,7 +852,7 @@ def evaluate_dist(denoiser, feature_extractor, anom_loader, normal_loader, confi
     # Image-level metrics
     roc_auc = roc_auc_score(y_true, y_score)
     ap = average_precision_score(y_true, y_score)
-    f1max_score, best_thr = f1_max_gpu_hist(torch.from_numpy(y_score).to(device), torch.from_numpy(y_true).bool().to(device), n_bins=501)
+    f1max_score, best_thr = f1_max_gpu_hist(torch.from_numpy(y_score).to(device), torch.from_numpy(y_true).bool().to(device), n_bins=1000)
     f1max_score = f1max_score.item() if isinstance(f1max_score, torch.Tensor) else f1max_score
     
     logger.info(f"[{category}] Image-level metrics: AUC: {roc_auc}, AP: {ap}, F1Max: {f1max_score} at epoch {epoch}")
@@ -1305,7 +902,7 @@ def evaluate_dist(denoiser, feature_extractor, anom_loader, normal_loader, confi
     roc_auc_px = ad_metrics["p_auroc"]
     pro = ad_metrics["p_aupro"]
     ap_px = average_precision_score(y_true_px, y_score_px)
-    f1max_px_score, best_thr_px = f1_max_gpu_hist(torch.from_numpy(y_score_px).to(device), torch.from_numpy(y_true_px).bool().to(device), n_bins=501)
+    f1max_px_score, best_thr_px = f1_max_gpu_hist(torch.from_numpy(y_score_px).to(device), torch.from_numpy(y_true_px).bool().to(device), n_bins=1000)
     f1max_px_score = f1max_px_score.item() if isinstance(f1max_px_score, torch.Tensor) else f1max_px_score
 
     logger.info(f"[{category}] Pixel-level metrics: AUC: {roc_auc_px}, AP: {ap_px}, PRO: {pro}, F1Max: {f1max_px_score} at epoch {epoch}")
@@ -1322,191 +919,17 @@ def evaluate_dist(denoiser, feature_extractor, anom_loader, normal_loader, confi
     return {category: metrics_dict}
 
 
-@torch.no_grad()
-def evaluate_dist_odm(denoiser, feature_extractor, anom_loader, normal_loader, config, in_sh, epoch, eval_step, device, world_size, rank):
-    denoiser.eval()
-    feature_extractor.eval()
-    category = anom_loader.dataset.category
 
-    logger.info(f"[{category}] Evaluating on {len(anom_loader.dataset)} anomalous samples and {len(normal_loader.dataset)} normal samples")
-    logger.info(f"[{category}] Evaluation step: {eval_step}")
-    logger.info(f"[{category}] Epoch: {epoch}")
-    
-    normal_ats = []
-    normal_nlls = []
-    normal_maps = []
-    normal_gt_masks = []
-
-    for i, batch in enumerate(normal_loader):
-        images = batch["samples"].to(device)
-        labels = batch["clslabels"].to(device)
-        normal_gt_masks.append(batch["masks"])
-        
-        z, _ = feature_extractor(images)
-        t = torch.tensor([0] * z.shape[0], device=device, dtype=torch.long)
-        model_kwargs = dict(c=labels)
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            latents_last = denoiser.module.net(z, t)
-        latents_last = latents_last.float()
-        latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
-        ats = torch.abs(latents_last_l2 - torch.sqrt(torch.tensor([0], device=device, dtype=torch.float32))) 
-        min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]  # (bs, )
-        max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]  # (bs, )
-        ats = torch.abs(min_ats_spatial - max_ats_spatial)  # (bs, )
-        nll = calculate_log_pdf(latents_last) * -1
-        
-        normal_map = F.interpolate(latents_last_l2.unsqueeze(0), size=(images.shape[2], images.shape[3]), mode='bilinear', align_corners=False).squeeze(0)
-        normal_maps.append(normal_map.cpu())
-    
-        normal_nlls.append(nll.cpu())
-        normal_ats.append(ats.cpu())
-    dist.barrier()  # Ensure all processes have completed the normal data processing
-        
-    anomaly_ats = []
-    anomaly_nlls = []
-    anomaly_maps = []
-    anomaly_gt_masks = []
-    for i, batch in enumerate(anom_loader):
-        images = batch["samples"].to(device)
-        labels = batch["clslabels"].to(device)
-        anomaly_gt_masks.append(batch["masks"])
-        
-        z, _ = feature_extractor(images)
-        t = torch.tensor([0] * z.shape[0], device=device, dtype=torch.long)
-        model_kwargs = dict(c=labels)
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            latents_last = denoiser.module.net(z, t)
-        latents_last = latents_last.float()
-
-        latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
-        ats = torch.abs(latents_last_l2 - torch.sqrt(torch.tensor([0], device=device, dtype=torch.float32))) 
-        min_ats_spatial = ats.view(ats.shape[0], -1).min(dim=1)[0]
-        max_ats_spatial = ats.view(ats.shape[0], -1).max(dim=1)[0]
-        ats = torch.abs(min_ats_spatial - max_ats_spatial)
-        nll = calculate_log_pdf(latents_last) * -1
-        
-        anomaly_map = F.interpolate(latents_last_l2.unsqueeze(0), size=(images.shape[2], images.shape[3]), mode='bilinear', align_corners=False).squeeze(0)
-        anomaly_maps.append(anomaly_map.cpu())
-        anomaly_nlls.append(nll.cpu())
-        anomaly_ats.append(ats.cpu())
-        del latents_last, latents_last_l2, ats
-        torch.cuda.empty_cache()                     
-    dist.barrier()  # Ensure all processes have completed the anomaly data processing
-    
-    normal_ats = torch.cat(normal_ats, dim=0)  
-    anomaly_ats = torch.cat(anomaly_ats, dim=0)
-    normal_nlls = torch.cat(normal_nlls, dim=0)
-    anomaly_nlls = torch.cat(anomaly_nlls, dim=0)
-    normal_maps = torch.cat(normal_maps, dim=0)
-    anomaly_maps = torch.cat(anomaly_maps, dim=0)
-    normal_gt_masks = torch.cat(normal_gt_masks, dim=0).squeeze(1)  # Assuming masks are in shape (bs, 1, h, w)
-    anomaly_gt_masks = torch.cat(anomaly_gt_masks, dim=0).squeeze(1)  # Assuming masks are in shape (bs, 1, h, w)
-    
-    # Gather results from all processes
-    def to_numpy(tensor):
-        return tensor.cpu().numpy() if tensor.is_cuda else tensor.numpy()
-    normal_ats = concat_all_gather(normal_ats, world_size)
-    anomaly_ats = concat_all_gather(anomaly_ats, world_size)
-    normal_nlls = concat_all_gather(normal_nlls, world_size)
-    anomaly_nlls = concat_all_gather(anomaly_nlls, world_size)
-    normal_maps = concat_all_gather(normal_maps, world_size)
-    anomaly_maps = concat_all_gather(anomaly_maps, world_size)
-    normal_gt_masks = concat_all_gather(normal_gt_masks, world_size)
-    anomaly_gt_masks = concat_all_gather(anomaly_gt_masks, world_size)
-    
-    if rank != 0:
-        return None
-    
-    logger.info(f"[{category}] Number of normal samples: {len(normal_ats)}")
-    logger.info(f"[{category}] Number of anomaly samples: {len(anomaly_ats)}")
-    ats_min = np.min([normal_ats.min(), anomaly_ats.min()])
-    ats_max = np.max([normal_ats.max(), anomaly_ats.max()])
-    nlls_min = np.min([normal_nlls.min(), anomaly_nlls.min()])
-    nlls_max = np.max([normal_nlls.max(), anomaly_nlls.max()])
-    eps = 1e-8  # Small constant to avoid division by zero
-    normal_ats = (normal_ats - ats_min) / (ats_max - ats_min + eps) 
-    anomaly_ats = (anomaly_ats - ats_min) / (ats_max - ats_min + eps) 
-    normal_nlls = (normal_nlls - nlls_min) / (nlls_max - nlls_min + eps)
-    anomaly_nlls = (anomaly_nlls - nlls_min) / (nlls_max - nlls_min + eps)
-
-    y_true = np.concatenate([np.zeros(len(normal_ats)), np.ones(len(anomaly_ats))])
-    normal_scores = normal_ats + normal_nlls
-    anomaly_scores = anomaly_ats + anomaly_nlls
-    y_score = np.concatenate([normal_scores, anomaly_scores])
-    
-    # Image-level metrics
-    roc_auc = roc_auc_score(y_true, y_score)
-    ap = average_precision_score(y_true, y_score)
-    f1max_score, best_thr = f1_max_gpu_hist(torch.from_numpy(y_score).to(device), torch.from_numpy(y_true).bool().to(device), n_bins=501)
-    f1max_score = f1max_score.item() if isinstance(f1max_score, torch.Tensor) else f1max_score
-    
-    logger.info(f"[{category}] Image-level metrics: AUC: {roc_auc}, AP: {ap}, F1Max: {f1max_score} at epoch {epoch}")
-    metrics_dict = {
-        "I-AUROC": roc_auc,
-        "I-AP": ap,
-        "I-F1Max": f1max_score
-    }
-    
-    # Pixel-level metrics
-    y_true_px = np.concatenate([
-        normal_gt_masks.flatten(),
-        anomaly_gt_masks.flatten()
-    ])
-    y_true_map = np.concatenate([
-        normal_gt_masks,
-        anomaly_gt_masks
-    ])
-    y_true_map = np.where(y_true_map > 0.5, 1, 0)
-    y_score_map = np.concatenate([
-        normal_maps, 
-        anomaly_maps
-    ])
-    y_true_px = np.where(y_true_px > 0.5, 1, 0)
-    y_score_px = np.concatenate([
-        normal_maps.flatten(),
-        anomaly_maps.flatten()
-    ])
-    score_min, score_max = y_score.min(), y_score.max()
-    anomap_min, anomap_max = y_score_map.min(), y_score_map.max()
-    accum = EvalAccumulatorCuda(score_min, score_max, anomap_min, anomap_max)
-    
-    accum_batch_size = 128
-    num_batches = len(y_true_px) // accum_batch_size + (1 if len(y_true_px) % accum_batch_size > 0 else 0)
-    logger.info(f"[{category}] Number of batches for pixel-level evaluation: {num_batches}")
-    for i in range(0, len(y_true_px), accum_batch_size):
-        end_idx = min(i + accum_batch_size, len(y_true_px))
-        batch_y_true_map = torch.from_numpy(y_true_map[i:end_idx]).to(device)
-        batch_y_score_map = torch.from_numpy(y_score_map[i:end_idx]).to(device)
-        batch_y_score = torch.from_numpy(y_score[i:end_idx]).to(device)
-        batch_y_true = torch.from_numpy(y_true[i:end_idx]).to(device)
-        
-        accum.add_anomap_batch(batch_y_score_map, batch_y_true_map)
-        accum.add_image(batch_y_score, batch_y_true)
-    
-    try:
-        ad_metrics = accum.summary()
-    except AssertionError as e:
-        logger.error(f"[{category}] Error in pixel-level evaluation: {e}")
-        ad_metrics = dict(p_auroc=0.0, p_aupro=0.0)
-    roc_auc_px = ad_metrics["p_auroc"]
-    pro = ad_metrics["p_aupro"]
-    ap_px = average_precision_score(y_true_px, y_score_px)
-    f1max_px_score, best_thr_px = f1_max_gpu_hist(torch.from_numpy(y_score_px).to(device), torch.from_numpy(y_true_px).bool().to(device), n_bins=501)
-    f1max_px_score = f1max_px_score.item() if isinstance(f1max_px_score, torch.Tensor) else f1max_px_score
-
-    logger.info(f"[{category}] Pixel-level metrics: AUC: {roc_auc_px}, AP: {ap_px}, PRO: {pro}, F1Max: {f1max_px_score} at epoch {epoch}")
-    mad = np.mean([roc_auc, roc_auc_px, ap, ap_px, pro, f1max_score, f1max_px_score])
-    logger.info(f"[{category}] mAD: {mad} at epoch {epoch}")
-    metrics_dict.update({
-        "P-AUROC": roc_auc_px,
-        "P-AP": ap_px,
-        "PRO": pro,
-        "P-F1Max": f1max_px_score,
-        "mAD": mad,
-    })
-    
-    return {category: metrics_dict}
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args)
+    def load_config(config_path):
+        with open(config_path, 'r') as stream:
+            try:
+                config = yaml.safe_load(stream)
+            except yaml.YAMLError as exc:
+                print(exc)
+        return config
+    
+    config = load_config(os.path.join(args.save_dir, "config.yaml"))
+    main(config, args)

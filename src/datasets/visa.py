@@ -1,14 +1,5 @@
 # LICENSE-DATASET  candle  capsules  cashew  chewinggum  fryum  macaroni1  macaroni2  pcb1  pcb2  pcb3  pcb4  pipe_fryum  split_csv
 
-## Meta csv example
-# object,split,label,image,mask
-# candle,train,normal,candle/Data/Images/Normal/0836.JPG,
-# candle,train,normal,candle/Data/Images/Normal/0451.JPG,
-# candle,train,normal,candle/Data/Images/Normal/0516.JPG,
-# candle,train,normal,candle/Data/Images/Normal/0977.JPG,
-# candle,train,normal,candle/Data/Images/Normal/0249.JPG,
-# candle,train,normal,candle/Data/Images/Normal/0548.JPG,
-
 import os
 from pathlib import Path
 from typing import *
@@ -75,7 +66,7 @@ class VisA(Dataset):
                 return torch.from_numpy(np.array(img, dtype=np.uint8)).long()
             self.mask_transform = transforms.Compose(
                 [
-                    transforms.Resize(input_res, interpolation=InterpolationMode.NEAREST),
+                    transforms.Resize((input_res, input_res), interpolation=InterpolationMode.NEAREST),
                     transforms.Lambda(mask_to_tensor)
                 ]
             )
@@ -156,17 +147,3 @@ class VisA(Dataset):
                 mask = self.mask_transform(mask).bool()
                 inputs["masks"] = mask
             return inputs
-
-if __name__ == "__main__":
-    dataset_root = "/home/haselab/projects/sakai/AnoMAR/AnoMAR/data/VisA"
-    category = "candle"
-    input_res = 224
-    split = "test"
-    transform = transforms.Compose([
-        transforms.Resize((input_res, input_res)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    dataset = VisA(dataset_root, category, input_res, split, transform)
-    print(len(dataset))
-    print(dataset[0])

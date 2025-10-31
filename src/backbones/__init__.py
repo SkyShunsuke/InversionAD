@@ -68,10 +68,9 @@ class DINO2Wrapper(nn.Module):
         
 def get_backbone_feature_shape(model_type):
     if model_type == "efficientnet-b4":
-        # return (272, 16, 16)
-        # return (272, 32, 32)
-        return (272, 14, 14)
-        # return (272, 24, 24)
+        return (272, 16, 16)
+    elif model_type == "wide_resnet50_2":
+        return (2048, 8, 8)
     elif model_type == "dinov2-small":
         return (384, 16, 16)
     elif model_type == "dinov2-base":
@@ -345,14 +344,14 @@ class BackboneWrapper(nn.Module):
     
 if __name__ == "__main__":
     model_kwargs = {
-        'model_type': 'efficientnet-b4',
+        'model_type': 'wide_resnet50_2',
         'outblocks': (1, 5, 9, 21),
         'outstrides': (2, 4, 8, 16),
         'pretrained': True,
         'stride': 16
     }
     model = get_backbone(**model_kwargs).to('cuda')
-    x = torch.randn(1, 3, 224, 224).to('cuda')
+    x = torch.randn(1, 3, 256, 256).to('cuda')
     with torch.no_grad():
         features, y = model(x)
     print(features[0].shape)

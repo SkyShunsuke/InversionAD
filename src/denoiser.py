@@ -8,10 +8,6 @@ import enum
 
 from typing import Tuple
 
-import os
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
-
 from src.diffusion import create_diffusion, SpacedDiffusion
 from src.models import create_denising_model
 from src.models.vision_transformer import PosEmbedding
@@ -19,6 +15,7 @@ from src.models.vision_transformer import PosEmbedding
 import logging
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger()
+
 
 class Denoiser(nn.Module):
     def __init__(
@@ -78,7 +75,7 @@ class Denoiser(nn.Module):
         
         self.train_diffusion: SpacedDiffusion = create_diffusion(timestep_respacing="", noise_schedule='linear', learn_sigma=learn_sigma, rescale_learned_sigmas=False)
         self.sample_diffusion: SpacedDiffusion = create_diffusion(timestep_respacing=num_sampling_steps, noise_schedule='linear')
-        
+    
     def forward(self, x, cls_label=None, batch_mean=True):
         """Denoising step for training.
         Args:
@@ -91,7 +88,7 @@ class Denoiser(nn.Module):
         # repeat target and mask_indices
         x = torch.repeat_interleave(x, self.num_repeat, dim=0)  # (B*N, C, H, W)
         
-        # class embedding
+        # class embedding, default -> False
         cls_embed = None
         if cls_label is not None:
             cls_embed = self.cls_embed(cls_label)  # (B, Z)
@@ -101,7 +98,7 @@ class Denoiser(nn.Module):
         t = torch.randint(0, self.train_diffusion.num_timesteps, (x.shape[0], ), device=x.device)  # (B*N, )
         
         # denoising
-        model_kwargs = dict(c=cls_label)
+        model_kwargs = dict(context=None)
         loss_dict = self.train_diffusion.training_losses(self.net, x, t, model_kwargs)
         loss = loss_dict['loss']
         
@@ -132,7 +129,7 @@ class Denoiser(nn.Module):
             sample_fn = self.net.forward_with_cfg
         else:
             noise = torch.randn(*input_shape).to(device)  # (B, C, H, W)
-            model_kwargs = dict(c=cls_label)
+            model_kwargs = dict(context=None)
             sample_fn = self.net.forward
         
         # sampling loop
@@ -196,7 +193,7 @@ class Denoiser(nn.Module):
             model_kwargs = dict(c=cls_embed, cfg_scale=cfg)
             sample_fn = self.net.forward_with_cfg
         else:
-            model_kwargs = dict(c=cls_label)
+            model_kwargs = dict(context=None)
             sample_fn = self.net.forward
             
         indices = list(range(t[0].item()))[::-1]
@@ -238,8 +235,7 @@ class Denoiser(nn.Module):
             model_kwargs = dict(c=cls_embed, cfg_scale=cfg)
             sample_fn = self.net.forward_with_cfg
         else:
-            # model_kwargs = dict(c=cls_embed, cfg_scale=cfg, z=z, mask_indices=mask_indices)
-            model_kwargs = dict(c=cls_label)
+            model_kwargs = dict(context=None)
             sample_fn = self.net.forward
         
         out = self.sample_diffusion.ddim_reverse_sample(
@@ -250,8 +246,7 @@ class Denoiser(nn.Module):
             model_kwargs=model_kwargs,
             eta=eta
         )
-        x_t = out["sample"]
-        return x_t
+        return out
 
     def ddim_reverse_sample(self, x_t: Tensor, t: Tensor, cls_label=None, cfg=1.0, eta=0.0) -> Tensor:
         assert torch.where(t == t[0], 1, 0).sum() == t.shape[0], "All timesteps must be the same"
@@ -266,7 +261,7 @@ class Denoiser(nn.Module):
             sample_fn = self.net.forward_with_cfg
         else:
             # model_kwargs = dict(c=cls_embed, cfg_scale=cfg, z=z, mask_indices=mask_indices)
-            model_kwargs = dict(c=cls_label)
+            model_kwargs = dict(context=None)
             sample_fn = self.net.forward
         
         indices = list(range(t[0].item(), int(self.num_sampling_steps)))
@@ -294,7 +289,7 @@ class Denoiser(nn.Module):
             model_kwargs = dict(c=cls_embed, cfg_scale=cfg)
             sample_fn = self.net.forward_with_cfg
         else:
-            model_kwargs = dict(c=cls_label)
+            model_kwargs = dict(context=None)
             sample_fn = self.net.forward
         
         out = self.sample_diffusion.p_sample(
