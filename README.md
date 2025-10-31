@@ -97,8 +97,7 @@ For now, we only provide models for multi-class AD on following datasets:
 - MVTecAD
 - VisA
 - MPDD
-- BMAD
-If you want to get the access to the other pre-trained models, including single-class AD models, Real-IAD models, ablation models, please contact me via email(sshunsuke0102@gmail.com) or build issue.
+If you want to get the access to the other pre-trained models, including single-class AD models, Real-IAD/BMAD models, ablation models, please contact me via email(sshunsuke0102@gmail.com) or build issue.
 
 ## Acknowledgements
 We thank for very nice diffusion implementation from [OpenAI](https://github.com/openai/guided-diffusion). 
