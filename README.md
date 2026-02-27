@@ -8,7 +8,7 @@
   <img src="demo/method.png" width="720">
 </p>
 
-This is a official PyTorch implementation of the paper [InvAD:Reconstruction-Free Anomaly Detection with Diffusion Models](https://arxiv.org/abs/2504.05662) accepted at CVPR 2026.:
+This is an official PyTorch implementation of the paper [InvAD:Reconstruction-Free Anomaly Detection with Diffusion Models](https://arxiv.org/abs/2504.05662) accepted at CVPR 2026:
 
 ```
 @article{sakai2026invnad,
