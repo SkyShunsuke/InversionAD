@@ -79,27 +79,6 @@ class MemoryEfficientSwish(nn.Module):
         x = x * torch.sigmoid(x)
         return x
 
-
-# A memory-efficient implementation of Swish function
-# class SwishImplementation(torch.autograd.Function):
-#     @staticmethod
-#     def forward(ctx, i):
-#         result = i * torch.sigmoid(i)
-#         ctx.save_for_backward(i)
-#         return result
-
-#     @staticmethod
-#     def backward(ctx, grad_output):
-#         i = ctx.saved_tensors[0]
-#         sigmoid_i = torch.sigmoid(i)
-#         return grad_output * (sigmoid_i * (1 + i * (1 - sigmoid_i)))
-
-
-# class MemoryEfficientSwish(nn.Module):
-#     def forward(self, x):
-#         return SwishImplementation.apply(x)
-
-
 def round_filters(filters, global_params):
     """Calculate and round number of filters based on width multiplier.
        Use width_coefficient, depth_divisor and min_depth of global_params.
@@ -213,12 +192,6 @@ def calculate_output_image_size(input_image_size, stride):
     return [image_height, image_width]
 
 
-# Note:
-# The following 'SamePadding' functions make output size equal ceil(input size/stride).
-# Only when stride equals 1, can the output size be the same as input size.
-# Don't be confused by their function names ! ! !
-
-
 def get_same_padding_conv2d(image_size=None):
     """Chooses static padding if you have specified an image size, and dynamic padding otherwise.
        Static padding is necessary for ONNX exporting of models.
@@ -239,18 +212,6 @@ class Conv2dDynamicSamePadding(nn.Conv2d):
     """2D Convolutions like TensorFlow, for a dynamic image size.
     The padding is operated in forward function by calculating dynamically.
     """
-
-    # Tips for 'SAME' mode padding.
-    #     Given the following:
-    #         i: width or height
-    #         s: stride
-    #         k: kernel size
-    #         d: dilation
-    #         p: padding
-    #     Output after Conv2d:
-    #         o = floor((i+p-((k-1)*d+1))/s+1)
-    # If o equals i, i = floor((i+p-((k-1)*d+1))/s+1),
-    # => p = (i-1)*s+((k-1)*d+1)-i
 
     def __init__(
         self,

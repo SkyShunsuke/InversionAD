@@ -6,9 +6,9 @@ import numpy as np
 from PIL import Image
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from torchvision import transforms
-from torchvision.transforms import functional as F, InterpolationMode
+from torchvision.transforms import functional as InterpolationMode
 
 MPDD_CLASSES = [
     "bracket_black",

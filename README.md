@@ -1,4 +1,4 @@
-# [CVPR2026] Reconstruction-Free Anomaly Detection with Diffusion Models<br><sub>Official PyTorch Implementation</sub>
+# [CVPR2026] InvAD: Inversion-based Reconstruction-Free Anomaly Detection with Diffusion Models</sub>
 
 [![arXiv](https://img.shields.io/badge/arXiv%20paper-2406.11838-b31b1b.svg)](https://arxiv.org/abs/2504.05662)&nbsp;
 [![Project Page](https://img.shields.io/badge/Project%20Page-visit-blue.svg)](https://skyshunsuke.github.io/InversionADProject/)
@@ -8,7 +8,7 @@
   <img src="demo/method.png" width="720">
 </p>
 
-This is a official PyTorch implementation of the paper [InvAD:Reconstruction-Free Anomaly Detection with Diffusion Models](https://arxiv.org/abs/2504.05662):
+This is a official PyTorch implementation of the paper [InvAD:Reconstruction-Free Anomaly Detection with Diffusion Models](https://arxiv.org/abs/2504.05662) accepted at CVPR 2026.:
 
 ```
 @article{sakai2026invnad,

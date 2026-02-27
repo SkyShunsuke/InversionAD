@@ -1,13 +1,12 @@
 
 
 from torchvision import transforms
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import ConcatDataset
 
 from .mvtec_ad import MVTecAD, AD_CLASSES
 from .visa import VisA, VISA_CLASSES
 from .mpdd import MPDD, MPDD_CLASSES
 
-import random
 
 def build_transforms(img_size, transform_type):
     # standarization
@@ -25,29 +24,8 @@ def build_transforms(img_size, transform_type):
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
-    elif transform_type == 'crop':
-        return transforms.Compose([
-            transforms.CenterCrop(img_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-    elif transform_type == 'rotate':
-        return transforms.Compose([
-            transforms.Resize((img_size, img_size)),
-            transforms.RandomRotation(15),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ])
-    elif transform_type == 'ddad':
-        return transforms.Compose(
-            [
-                transforms.Resize((img_size, img_size)),  
-                transforms.ToTensor(), # Scales data into [0,1] 
-                transforms.Lambda(lambda t: (t * 2) - 1) # Scale between [-1, 1] 
-            ]
-        )
     else:
-        raise ValueError(f"Invalid transform: {transform_type}")
+        raise ValueError(f"Invalid transform type: {transform_type}")
 
 def build_dataset(*, dataset_name: str, data_root: str, train: bool, img_size: int, transform_type: str, **kwargs):
     if dataset_name == 'mvtec_ad':

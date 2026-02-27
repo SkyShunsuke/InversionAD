@@ -1,7 +1,6 @@
 
 import os
 import sys
-sys.path.append("/home/haselab/projects/sakai_ssd/InversionAD")
 import torch
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
@@ -23,7 +22,6 @@ from src.utils import get_optimizer, get_lr_scheduler
 from src.denoiser import get_denoiser, Denoiser
 from src.backbones import get_backbone, get_backbone_feature_shape
 
-from einops import rearrange
 from skimage import measure
 from sklearn.metrics import roc_auc_score, average_precision_score, auc
 from src.utils import AverageMeter
@@ -33,8 +31,6 @@ from torch.utils.data import ConcatDataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn import functional as F
 import matplotlib.pyplot as plt 
-
-from anomalib import metrics
 
 MAX_BATCH_SIZE = 64
 NUM_WORKERS = 4

@@ -9,9 +9,9 @@ from PIL import Image
 
 import torch
 import pandas as pd
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from torchvision import transforms
-from torchvision.transforms import functional as F, InterpolationMode
+from torchvision.transforms import functional as InterpolationMode
 
 VISA_CLASSES = [
     "candle",

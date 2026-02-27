@@ -247,7 +247,6 @@ class GaussianDiffusion:
         Returns:
             Tensor: tensor of shape (B, C, H, W) representing the new mean.
         """
-        # TODO: 
         gradient = cond_fn(x, t, **model_kwargs)  # (B, C, H, W)
         new_mean = p_mean_var['mean'].float() + p_mean_var['variance'] * gradient.float()
         return new_mean
@@ -263,7 +262,6 @@ class GaussianDiffusion:
         Returns:
             dict: dictionary containing the mean and variance of the previous step.
         """
-        # TODO: 
         alpha_bar = extract_into_tensor(self.alphas_cumprod, t, x.shape)  # (B, C, H, W)
         
         eps = self._predict_eps_from_xstart(x_t=x, t=t, pred_xstart=p_mean_var['pred_xstart'])
