@@ -65,7 +65,7 @@ class MPDD(Dataset):
                 return torch.from_numpy(np.array(img, dtype=np.uint8)).long()
             self.mask_transform = transforms.Compose(
                 [
-                    transforms.Resize(input_res, interpolation=InterpolationMode.NEAREST),
+                    transforms.Resize((self.input_res, self.input_res)),
                     transforms.Lambda(mask_to_tensor)
                 ]
             )
