@@ -1,6 +1,6 @@
 ### For MVTecAD
 
-echo "Downloading MVTecAD and MVTecLOCO datasets... It may take a while (about 10 miniutes)."
+echo "Downloading MVTecAD dataset... It may take a while (about 10 miniutes)."
 
 ## make data directory if not exists
 mkdir -p data/mvtec_ad

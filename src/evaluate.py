@@ -169,7 +169,7 @@ def main(config, args):
             logger.warning(f"Best model checkpoint not found at {checkpoint_path}. Using latest model instead.")
             checkpoint_path = os.path.join(args.save_dir, 'model_latest.pth')
     else:
-        checkpoint_path = os.path.join(args.save_dir, 'model_latest_ep24.pth')
+        checkpoint_path = os.path.join(args.save_dir, 'model_latest.pth')
         
     model_ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     if 'module.' in list(model_ckpt.keys())[0]:
@@ -411,7 +411,7 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
             latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
             min_diffs_spatial = latents_last_l2.view(latents_last_l2.shape[0], -1).min(dim=1)[0]  # (bs, )
             max_diffs_spatial = latents_last_l2.view(latents_last_l2.shape[0], -1).max(dim=1)[0]  # (bs, )
-            diffs = min_diffs_spatial - max_diffs_spatial  # (bs, )
+            diffs = max_diffs_spatial - min_diffs_spatial  # (bs, )
             nll = calculate_log_pdf(latents_last.cpu()) * -1
             e_time = time.perf_counter()
             time_meter.update(e_time - s_time, n=1)
@@ -463,7 +463,7 @@ def evaluate_inv(denoiser, feature_extractor, anom_loaders, normal_loaders, conf
             latents_last_l2 = torch.sum(latents_last ** 2, dim=1).sqrt()
             min_diffs_spatial = latents_last_l2.view(latents_last_l2.shape[0], -1).min(dim=1)[0]
             max_diffs_spatial = latents_last_l2.view(latents_last_l2.shape[0], -1).max(dim=1)[0]
-            diffs = min_diffs_spatial - max_diffs_spatial
+            diffs = max_diffs_spatial - min_diffs_spatial
             nll = calculate_log_pdf(latents_last.cpu()) * -1
             e_time = time.perf_counter()
             
