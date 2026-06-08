@@ -1,6 +1,6 @@
 diffusion:
   model_type: 'dit'
-  num_classes: 15
+  num_classes: 6
   target_channels: 3
   z_channels: 768
   depth: 16
@@ -28,10 +28,10 @@ backbone:
 data:
   batch_size: 8
   category: all
-  data_root: data/visa
-  dataset_name: visa_all
+  data_root: data/mpdd
+  dataset_name: mpdd_all
   img_size: 256
-  multi_category: false
+  multi_category: true
   num_normal_samples: -1
   num_workers: 1
   pin_memory: true
@@ -51,7 +51,7 @@ logging:
   log_interval: 10
   save_interval: 300
   save_images: false
-  save_dir: 'results/exp_dit_gigant_visa/all'
+  save_dir: 'results/exp_dit_gigant_mpdd/all'
 evaluation:
   eval_interval: 50
   eval_step: 3
