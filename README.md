@@ -14,7 +14,6 @@ This is an official PyTorch implementation of the paper [InvAD:Reconstruction-Fr
 @article{sakai2026invnad,
       title={InvAD: Inversion-based Reconstruction-Free Anomaly Detection with Diffusion Models}, 
       author={Shunsuke Sakai, Xiangteng He, Chunzhi Gu, Leonid Sigal, Tatsuhito Hasegawa},
-      year={2026},
       booktitle={Proceedings of the Computer Vision and Pattern Recognition Conference},
       year={2026}
 }
